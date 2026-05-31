@@ -1,0 +1,13 @@
+# Go
+/server/webrtc_server
+/server/webrtc_server.exe
+*.exe
+
+# PlatformIO
+.pio/
+.vscode/
+
+# IDEs
+.idea/
+*.swp
+.DS_Store

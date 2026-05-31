@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 WebRTC Audio</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 50px; }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px; cursor: pointer; }
+        #status { margin-top: 20px; font-weight: bold; color: #333; }
+    </style>
+</head>
+<body>
+    <h1>ESP32 实时音频通信终端</h1>
+    
+    <div>
+        <button id="startBtn">开始连接</button>
+        <button id="stopBtn" disabled>停止连接</button>
+    </div>
+
+    <!-- 隐藏的 audio 标签，用于播放从服务器(经过ESP32)传来的音频流 -->
+    <audio id="remoteAudio" autoplay></audio>
+
+    <div id="status">状态：未连接</div>
+
+    <script src="app.js"></script>
+</body>
+</html>
