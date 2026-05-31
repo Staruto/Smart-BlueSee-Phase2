@@ -31,6 +31,61 @@ WiFiUDP udp;
 // 采用 8kHz 采样率，配合 G.711 (PCMU) 刚好合适
 #define SAMPLE_RATE   8000
 
+// ========== G.711 PCMU 编解码 ==========
+#define BIAS 0x84
+#define CLIP 32635
+
+static uint8_t encode_ulaw(int16_t sample) {
+    static const int exp_lut[256] = {
+        0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3,
+        4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+    };
+    int sign, exponent, mantissa;
+    uint8_t ulawbyte;
+
+    sign = (sample >> 8) & 0x80;
+    if (sign != 0) sample = -sample;
+    if (sample > CLIP) sample = CLIP;
+
+    sample = sample + BIAS;
+    exponent = exp_lut[(sample >> 7) & 0xFF];
+    mantissa = (sample >> (exponent + 3)) & 0x0F;
+    ulawbyte = ~(sign | (exponent << 4) | mantissa);
+
+    if (ulawbyte == 0) ulawbyte = 0x02;
+
+    return ulawbyte;
+}
+
+static int16_t decode_ulaw(uint8_t ulawbyte) {
+    static const int exp_lut[8] = {0, 132, 396, 924, 1980, 4092, 8316, 16764};
+    int sign, exponent, mantissa, sample;
+
+    ulawbyte = ~ulawbyte;
+    sign = (ulawbyte & 0x80);
+    exponent = (ulawbyte >> 4) & 0x07;
+    mantissa = ulawbyte & 0x0F;
+
+    sample = exp_lut[exponent] + (mantissa << (exponent + 3));
+    if (sign != 0) sample = -sample;
+
+    return sample;
+}
+
 void setupWiFi() {
     Serial.print("Connecting to WiFi");
     WiFi.begin(ssid, password);
@@ -109,30 +164,42 @@ void setup() {
 }
 
 void loop() {
-    // ---- 1. 读取麦克风声音，发送给云端 ----
+    // ---- 1. 读取麦克风声音，压缩成 PCMU 后发送 ----
     int16_t in_buffer[256];
     size_t bytes_read = 0;
     
-    // DMA读取块。注意：这里我们先传输原始 PCM 用于验证
-    // 日后可以做 G.711u 压缩以节约带宽
+    // DMA读取块
     i2s_read(I2S_PORT_IN, &in_buffer, sizeof(in_buffer), &bytes_read, portMAX_DELAY);
     
     if (bytes_read > 0) {
+        int samples = bytes_read / sizeof(int16_t);
+        uint8_t pcmu_buffer[256];
+        
+        for (int i = 0; i < samples; i++) {
+            pcmu_buffer[i] = encode_ulaw(in_buffer[i]);
+        }
+        
         udp.beginPacket(serverIP, serverUDPPort);
-        udp.write((uint8_t*)in_buffer, bytes_read);
+        udp.write(pcmu_buffer, samples);
         udp.endPacket();
     }
 
-    // ---- 2. 从云端接收声音，写入扬声器 ----
+    // ---- 2. 从云端接收 PCMU 声音，解压成 PCM 后写入扬声器 ----
     int packetSize = udp.parsePacket();
     if (packetSize > 0) {
-        uint8_t out_buffer[1024]; // 保证缓冲区足够
-        int len = udp.read(out_buffer, sizeof(out_buffer));
+        uint8_t udp_buffer[1024];
+        int len = udp.read(udp_buffer, sizeof(udp_buffer));
         
         if (len > 0) {
+            int16_t out_buffer[1024];
+            
+            for (int i = 0; i < len; i++) {
+                out_buffer[i] = decode_ulaw(udp_buffer[i]);
+            }
+            
             size_t bytes_written = 0;
-            // 写入 I2S DMA 进行发声
-            i2s_write(I2S_PORT_OUT, out_buffer, len, &bytes_written, portMAX_DELAY);
+            // 写入 I2S DMA 进行发声 (注意写入的字节数是样本数 * int16_t大小)
+            i2s_write(I2S_PORT_OUT, out_buffer, len * sizeof(int16_t), &bytes_written, portMAX_DELAY);
         }
     }
 }
