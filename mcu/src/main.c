@@ -89,7 +89,7 @@ static void i2s_init(void) {
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S, // 修复：必须是 STAND_I2S 格式
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = I2S_DMA_BUF_COUNT,
         .dma_buf_len = I2S_DMA_BUF_LEN,
@@ -188,40 +188,62 @@ static void udp_task(void *arg) {
     server_addr.sin_port = htons(UDP_SERVER_PORT);
     inet_aton(UDP_SERVER_IP, &server_addr.sin_addr);
 
-    uint8_t *i2s_read_buf = (uint8_t *)malloc(4096);
-    uint8_t rx_buf[2048];
+    uint8_t *i2s_read_buf = (uint8_t *)malloc(1024);
+    uint8_t rx_buf[1024];
 
     while (1) {
         size_t bytes_read = 0;
-        esp_err_t r = i2s_read(I2S_PORT, i2s_read_buf, 4096, &bytes_read, pdMS_TO_TICKS(200));
+        // Read smaller chunks (e.g. 640 bytes = 160 samples of 32-bit = 20ms at 8kHz)
+        esp_err_t r = i2s_read(I2S_PORT, i2s_read_buf, 640, &bytes_read, pdMS_TO_TICKS(100));
         if (r == ESP_OK && bytes_read > 0) {
             size_t samples = bytes_read / sizeof(int32_t);
-            if (samples > 2048) samples = 2048;
-            uint8_t ulaw_buf[2048];
+            if (samples > 256) samples = 256;
+            uint8_t ulaw_buf[256];
             int32_t *s32 = (int32_t *)i2s_read_buf;
             for (size_t i = 0; i < samples; i++) {
-                int16_t s16 = (int16_t)(s32[i] >> 16);
-                ulaw_buf[i] = encode_ulaw(s16);
+                int32_t pcm_val = s32[i] >> 16;
+                // 添加软件增益 4 倍，防止 INMP441 初始音量极小导致听不见
+                pcm_val *= 4; 
+                if (pcm_val > 32767) pcm_val = 32767;
+                if (pcm_val < -32768) pcm_val = -32768;
+                
+                ulaw_buf[i] = encode_ulaw((int16_t)pcm_val);
             }
             sendto(sock, ulaw_buf, samples, 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
         }
 
-        // Use MSG_DONTWAIT to prevent hanging if no audio is received from PC
-        ssize_t len = recvfrom(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT, NULL, NULL);
-        if (len > 0) {
+        // Use MSG_DONTWAIT to prevent hanging, and loop to drain buffer of all incoming WebRTC packets (which arrive every 20ms)
+        while (1) {
+            ssize_t len = recvfrom(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT, NULL, NULL);
+            if (len <= 0) {
+                break;
+            }
             // decode and write to I2S
-            int16_t pcm16[2048];
+            // Use smaller stack arrays to prevent Stack Overflow panic
+            int16_t pcm16[256];
+            int32_t i2s_out[256];
             size_t out_samples = 0;
+            if (len > 256) len = 256;
+
             for (ssize_t i = 0; i < len; i++) {
                 pcm16[out_samples++] = decode_ulaw(rx_buf[i]);
             }
-            // convert to i2s 32-bit samples
-            int32_t i2s_out[2048];
             for (size_t i = 0; i < out_samples; i++) {
-                i2s_out[i] = ((int32_t)pcm16[i]) << 16;
+                // 增加极其关键的重重输出数字增益：如果电脑浏览器没做放大，这里声音会细若游丝
+                int32_t amplified = ((int32_t)pcm16[i]) * 12; 
+                if (amplified > 32767) amplified = 32767;
+                if (amplified < -32768) amplified = -32768;
+                // I2S 32-bit 对齐，数据在高16位
+                i2s_out[i] = amplified << 16;
             }
             size_t bytes_written = 0;
-            i2s_write(I2S_PORT, i2s_out, out_samples * sizeof(int32_t), &bytes_written, pdMS_TO_TICKS(200));
+            i2s_write(I2S_PORT, i2s_out, out_samples * sizeof(int32_t), &bytes_written, portMAX_DELAY);
+
+            // 每隔一段时间打印一次，确认ESP32真的在这个阶段收到了服务器传来的音频
+            static int dbg_rx_cnt = 0;
+            if (dbg_rx_cnt++ % 100 == 0) {
+                ESP_LOGI(TAG, "=> Receiving & Playing PC Audio, Payload Size: %d", (int)len);
+            }
         }
     }
 
