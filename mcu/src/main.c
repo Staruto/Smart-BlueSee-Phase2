@@ -91,7 +91,7 @@ static void i2s_init(void) {
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S, // 修复：必须是 STAND_I2S 格式
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = I2S_DMA_BUF_COUNT,
         .dma_buf_len = I2S_DMA_BUF_LEN,
@@ -204,7 +204,6 @@ static void udp_task(void *arg) {
             int32_t *s32 = (int32_t *)i2s_read_buf;
             for (size_t i = 0; i < samples; i++) {
                 int32_t pcm_val = s32[i] >> 16;
-                // 添加软件增益 4 倍，防止 INMP441 初始音量极小导致听不见
                 pcm_val *= 4; 
                 if (pcm_val > 32767) pcm_val = 32767;
                 if (pcm_val < -32768) pcm_val = -32768;
@@ -231,17 +230,15 @@ static void udp_task(void *arg) {
                 pcm16[out_samples++] = decode_ulaw(rx_buf[i]);
             }
             for (size_t i = 0; i < out_samples; i++) {
-                // 增加极其关键的重重输出数字增益：如果电脑浏览器没做放大，这里声音会细若游丝
                 int32_t amplified = ((int32_t)pcm16[i]) * 12; 
                 if (amplified > 32767) amplified = 32767;
                 if (amplified < -32768) amplified = -32768;
-                // I2S 32-bit 对齐，数据在高16位
                 i2s_out[i] = amplified << 16;
             }
             size_t bytes_written = 0;
             i2s_write(I2S_PORT, i2s_out, out_samples * sizeof(int32_t), &bytes_written, portMAX_DELAY);
 
-            // 每隔一段时间打印一次，确认ESP32真的在这个阶段收到了服务器传来的音频
+            // Print a report every so often to confirm that the ESP32 has actually received the audio from the server at this stage
             static int dbg_rx_cnt = 0;
             if (dbg_rx_cnt++ % 100 == 0) {
                 ESP_LOGI(TAG, "=> Receiving & Playing PC Audio, Payload Size: %d", (int)len);

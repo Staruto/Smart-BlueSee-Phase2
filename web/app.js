@@ -9,23 +9,23 @@ let localStream = null;
 
 startBtn.onclick = async () => {
     startBtn.disabled = true;
-    updateStatus('正在请求麦克风权限...');
+    updateStatus('Requesting microphone permissions...');
     
     try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     } catch (e) {
-        alert('获取麦克风失败: ' + e);
+        alert('Failed to access microphone: ' + e);
         startBtn.disabled = false;
         return;
     }
 
-    updateStatus('正在连接信令服务器...');
+    updateStatus('Connecting to signaling server...');
     
-    // 连接到 Go WebSocket 信令服务器
+    // Connect to the Go WebSocket signaling server
     ws = new WebSocket(getWebSocketUrl());
     
     ws.onopen = () => {
-        updateStatus('信令服务器已连接，正在协商 WebRTC...');
+        updateStatus('Signaling server connected, negotiating WebRTC...');
         startWebRTC();
     };
 
@@ -33,7 +33,7 @@ startBtn.onclick = async () => {
         const msg = JSON.parse(event.data);
         if (msg.type === 'answer') {
             await pc.setRemoteDescription(new RTCSessionDescription(msg));
-            updateStatus('WebRTC 连接已建立！');
+            updateStatus('WebRTC connection established!');
             stopBtn.disabled = false;
         } else if (msg.type === 'candidate') {
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
@@ -41,12 +41,12 @@ startBtn.onclick = async () => {
     };
 
     ws.onerror = () => {
-        updateStatus('信令服务连接错误！');
+        updateStatus('Error connecting to signaling server!');
     };
 
     ws.onclose = () => {
         if (stopBtn.disabled) {
-            updateStatus('信令服务连接已关闭');
+            updateStatus('Signaling server connection closed');
         }
     };
 };
@@ -58,16 +58,16 @@ stopBtn.onclick = () => {
     
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    updateStatus('已断开连接');
+    updateStatus('Connection disconnected');
 };
 
 async function startWebRTC() {
-    // 创建基础的 RTCPeerConnection
+    // Create the basic RTCPeerConnection
     pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
 
-    // 接收到远端音轨时的处理（ESP32 的声音）
+    // Handling Received Remote Audio Tracks (ESP32 Audio)
     pc.ontrack = (event) => {
         if (remoteAudio.srcObject !== event.streams[0]) {
             remoteAudio.srcObject = event.streams[0];
@@ -75,7 +75,7 @@ async function startWebRTC() {
         }
     };
 
-    // 当有本地的 ICE 候选者时，发送给服务器
+    // When there is a local ICE candidate, send it to the server
     pc.onicecandidate = (event) => {
         if (event.candidate) {
             ws.send(JSON.stringify({
@@ -85,10 +85,10 @@ async function startWebRTC() {
         }
     };
 
-    // 将本地麦克风音轨添加到 PeerConnection
+    // Add a local microphone track to PeerConnection
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-    // 创建 Offer 并通过 WS 发送给服务器
+    // Create Offer and send to signaling server by WebSocket
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     
@@ -96,7 +96,7 @@ async function startWebRTC() {
 }
 
 function updateStatus(text) {
-    statusDiv.textContent = '状态：' + text;
+    statusDiv.textContent = 'status: ' + text;
     console.log(text);
 }
 
