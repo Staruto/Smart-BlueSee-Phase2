@@ -22,7 +22,7 @@ startBtn.onclick = async () => {
     updateStatus('正在连接信令服务器...');
     
     // 连接到 Go WebSocket 信令服务器
-    ws = new WebSocket('ws://' + window.location.host + '/ws');
+    ws = new WebSocket(getWebSocketUrl());
     
     ws.onopen = () => {
         updateStatus('信令服务器已连接，正在协商 WebRTC...');
@@ -40,8 +40,14 @@ startBtn.onclick = async () => {
         }
     };
 
-    ws.onerror = (e) => {
+    ws.onerror = () => {
         updateStatus('信令服务连接错误！');
+    };
+
+    ws.onclose = () => {
+        if (stopBtn.disabled) {
+            updateStatus('信令服务连接已关闭');
+        }
     };
 };
 
@@ -92,4 +98,9 @@ async function startWebRTC() {
 function updateStatus(text) {
     statusDiv.textContent = '状态：' + text;
     console.log(text);
+}
+
+function getWebSocketUrl() {
+    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return scheme + '://' + window.location.host + '/ws';
 }

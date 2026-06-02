@@ -1,0 +1,18 @@
+[Unit]
+Description=WebRTC audio bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webrtc
+Group=webrtc
+WorkingDirectory=/opt/webrtc-client/current
+ExecStart=/opt/webrtc-client/bin/webrtc_server -http 127.0.0.1:8080 -udp :5000 -web-dir=
+Restart=always
+RestartSec=2
+Environment=WEBRTC_HTTP_ADDR=127.0.0.1:8080
+Environment=WEBRTC_UDP_ADDR=:5000
+
+[Install]
+WantedBy=multi-user.target

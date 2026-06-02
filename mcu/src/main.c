@@ -9,6 +9,8 @@
 #include "esp_wifi.h"
 #include "driver/i2s.h"
 #include "driver/gpio.h"
+#include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -27,7 +29,7 @@ static const char *TAG = "udp_pcmu_espidf";
 // --- Network / UDP ---
 #define WIFI_SSID      "yuhao"
 #define WIFI_PASS      "12345678"
-#define UDP_SERVER_IP  "192.168.137.101"
+#define UDP_SERVER_IP  "117.72.24.77"
 #define UDP_SERVER_PORT 5000
 #define UDP_LOCAL_PORT  5000
 
