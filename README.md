@@ -63,11 +63,12 @@ The buffered commit endpoint uses whatever PCMU audio the ESP32 has already sent
 Environment variables:
 
 - `VOICE_AGENT_ASR_BACKEND=mock|http`
-- `VOICE_AGENT_LLM_BACKEND=mock|http`
+- `VOICE_AGENT_LLM_BACKEND=mock|http|openai`
 - `VOICE_AGENT_TTS_BACKEND=mock|http`
 - `VOICE_AGENT_ASR_ENDPOINT=http://127.0.0.1:8091/transcribe`
 - `VOICE_AGENT_LLM_ENDPOINT=http://127.0.0.1:8092/respond`
 - `VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8093/synthesize`
+- `VOICE_AGENT_LLM_MODEL=local-model`
 
 `mock` mode validates server orchestration without requiring external modules. The mock TTS sends a generated PCMU tone, not spoken speech.
 

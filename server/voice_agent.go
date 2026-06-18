@@ -408,6 +408,13 @@ func newAgentClient(cfg config) (AgentClient, error) {
 			endpoint: cfg.llmEndpoint,
 			client:   &http.Client{Timeout: 60 * time.Second},
 		}, nil
+	case "openai":
+		return openAICompatibleAgentClient{
+			endpoint:  cfg.llmEndpoint,
+			model:     cfg.llmModel,
+			maxTokens: cfg.llmMaxTokens,
+			client:    &http.Client{Timeout: 90 * time.Second},
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported LLM backend %q", cfg.llmBackend)
 	}
@@ -525,6 +532,71 @@ func (h httpAgentClient) Run(ctx context.Context, req agentRequest) (agentResult
 		text = resp.Content
 	}
 	return agentResult{Text: text, StopReason: resp.StopReason, Trace: resp.Trace}, nil
+}
+
+type openAICompatibleAgentClient struct {
+	endpoint  string
+	model     string
+	maxTokens int
+	client    *http.Client
+}
+
+func (o openAICompatibleAgentClient) Run(ctx context.Context, req agentRequest) (agentResult, error) {
+	messages := make([]chatMessage, 0, len(req.Messages)+1)
+	if strings.TrimSpace(req.SystemPrompt) != "" {
+		messages = append(messages, chatMessage{Role: "system", Content: req.SystemPrompt})
+	}
+	messages = append(messages, req.Messages...)
+
+	payload := struct {
+		Model       string        `json:"model"`
+		Messages    []chatMessage `json:"messages"`
+		Stream      bool          `json:"stream"`
+		MaxTokens   int           `json:"max_tokens,omitempty"`
+		Temperature float64       `json:"temperature,omitempty"`
+	}{
+		Model:       o.model,
+		Messages:    messages,
+		Stream:      false,
+		MaxTokens:   o.maxTokens,
+		Temperature: 0.3,
+	}
+
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Error *struct {
+			Message string `json:"message"`
+			Type    string `json:"type,omitempty"`
+		} `json:"error,omitempty"`
+	}
+	if err := postJSON(ctx, o.client, o.endpoint, payload, &resp); err != nil {
+		return agentResult{}, err
+	}
+	if resp.Error != nil {
+		return agentResult{}, fmt.Errorf("OpenAI-compatible LLM error: %s", resp.Error.Message)
+	}
+	if len(resp.Choices) == 0 {
+		return agentResult{}, fmt.Errorf("OpenAI-compatible LLM returned no choices")
+	}
+
+	choice := resp.Choices[0]
+	text := strings.TrimSpace(choice.Message.Content)
+	if text == "" && strings.TrimSpace(choice.Message.ReasoningContent) != "" {
+		return agentResult{}, fmt.Errorf("OpenAI-compatible LLM returned reasoning_content but empty final content; disable reasoning or increase/budget tokens")
+	}
+	return agentResult{
+		Text:       text,
+		StopReason: choice.FinishReason,
+		Trace: []agentTraceStep{
+			{Step: 1, Type: "llm", Summary: "OpenAI-compatible chat completion returned a final answer."},
+		},
+	}, nil
 }
 
 type httpTTSClient struct {
