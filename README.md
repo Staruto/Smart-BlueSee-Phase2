@@ -72,6 +72,43 @@ Environment variables:
 
 `mock` mode validates server orchestration without requiring external modules. The mock TTS sends a generated PCMU tone, not spoken speech.
 
+## Local ASR/TTS adapter
+
+Use `tools/local_voice_adapter.py` when ASR and TTS run on the PC in the sibling `client` repo. The adapter exposes the HTTP contracts expected by the Go server and converts between PCMU 8 kHz and the local Python modules' PCM16 APIs.
+
+Start the adapter on the PC:
+
+```powershell
+python tools\local_voice_adapter.py `
+  --host 127.0.0.1 `
+  --port 8094 `
+  --client-dir C:\x\void\llm\client `
+  --preload
+```
+
+Validate it directly:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8094/healthz
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8094/synthesize `
+  -ContentType 'application/json' `
+  -Body '{"session_id":"local-test","text":"hello from local t t s","audio_format":{"encoding":"g711_ulaw","sample_rate_hz":8000,"channels":1}}'
+```
+
+Point the Go server at the local adapter:
+
+```powershell
+$env:VOICE_AGENT_ASR_BACKEND="http"
+$env:VOICE_AGENT_ASR_ENDPOINT="http://127.0.0.1:8094/transcribe"
+$env:VOICE_AGENT_TTS_BACKEND="http"
+$env:VOICE_AGENT_TTS_ENDPOINT="http://127.0.0.1:8094/synthesize"
+```
+
+For cloud-to-PC validation, replace `127.0.0.1:8094` with the same server-reachable tunnel or VPN address pattern used for the real LLM.
+
 ## Module contracts
 
 ASR request:
