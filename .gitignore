@@ -8,6 +8,10 @@
 .pio/
 .vscode/
 
+# Python
+__pycache__/
+*.pyc
+
 # IDEs
 .idea/
 *.swp

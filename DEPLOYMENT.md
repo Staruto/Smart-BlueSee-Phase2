@@ -296,6 +296,7 @@ Expected results:
 - HTTP `200`
 - JSON reply includes `input_text`, `reply_text`, `turn_id`
 - `reply_text` is non-empty
+- `output_audio_bytes` is greater than `0` when real or mock TTS is enabled
 
 Then confirm status updated:
 
@@ -308,7 +309,41 @@ Expected results:
 - `last_turn` is populated
 - `history_messages` increased
 
-### 4.3 Validate outbound audio back to ESP32
+### 4.3 Validate software-only audio turns without ESP32
+
+This checks the full server-side chain without hardware:
+
+- `base64 PCMU audio -> Go server -> ASR -> LLM -> TTS -> Go server`
+
+Use this before ESP32 debugging when ASR / LLM / TTS run locally on your PC and the Go server is either local or on the cloud.
+
+First generate a known PCMU payload. One simple option is to call the local adapter `/synthesize` endpoint and reuse its `audio_base64` response:
+
+```powershell
+$tts = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8094/synthesize `
+  -ContentType 'application/json' `
+  -Body '{"session_id":"software-test","text":"hello from software audio test","audio_format":{"encoding":"g711_ulaw","sample_rate_hz":8000,"channels":1}}'
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8080/api/voice/audio-turn `
+  -ContentType 'application/json' `
+  -Body (@{audio_base64=$tts.audio_base64; speak=$false} | ConvertTo-Json)
+```
+
+Expected results:
+
+- HTTP `200`
+- `source` is `audio`
+- `input_text` is produced by real ASR
+- `reply_text` is produced by real LLM
+- `output_audio_bytes` is greater than `0`
+
+For cloud validation with ASR / LLM / TTS still on your PC, replace the module endpoints in the Go service environment with PC-reachable tunnel or VPN URLs. Keep `speak:false` while ESP32 is offline.
+
+### 4.4 Validate outbound audio back to ESP32
 
 This checks whether synthesized PCMU audio can be pushed from the cloud server back to the board.
 
@@ -332,7 +367,7 @@ Expected results:
 - ESP32 speaker plays audio
 - server logs show an ESP32 UDP endpoint was discovered
 
-### 4.4 Validate buffered ESP32 microphone audio
+### 4.5 Validate buffered ESP32 microphone audio
 
 This checks the full current voice path:
 
@@ -370,7 +405,7 @@ If you use mock backends:
 - LLM returns a simple echoed reply
 - TTS returns a tone, not spoken speech
 
-### 4.5 Validate browser transport separately
+### 4.6 Validate browser transport separately
 
 Only do this when checking WebRTC transport regressions.
 

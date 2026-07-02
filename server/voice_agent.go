@@ -191,29 +191,7 @@ func (v *voiceAgentService) CommitBufferedAudio(ctx context.Context, speak bool)
 		return voiceTurnResult{}, err
 	}
 
-	req := asrRequest{
-		SessionID: v.cfg.sessionID,
-		AudioFormat: audioFormat{
-			Encoding:     audioEncodingG711ULaw,
-			SampleRateHz: audioSampleRateHz,
-			Channels:     audioChannels,
-		},
-		AudioBase64: base64.StdEncoding.EncodeToString(snapshot),
-	}
-
-	asrResult, err := v.asr.Transcribe(ctx, req)
-	if err != nil {
-		v.restoreBufferedAudio(snapshot)
-		return voiceTurnResult{}, err
-	}
-
-	text := strings.TrimSpace(asrResult.Text)
-	if text == "" {
-		v.restoreBufferedAudio(snapshot)
-		return voiceTurnResult{}, fmt.Errorf("ASR returned empty text")
-	}
-
-	turn, err := v.executeTurn(ctx, "audio", text, len(snapshot), speak)
+	turn, err := v.executeAudioTurn(ctx, "audio", snapshot, speak)
 	if err != nil {
 		v.restoreBufferedAudio(snapshot)
 		return voiceTurnResult{}, err
@@ -221,6 +199,49 @@ func (v *voiceAgentService) CommitBufferedAudio(ctx context.Context, speak bool)
 
 	v.finishTurn(&turn)
 	return turn, nil
+}
+
+func (v *voiceAgentService) RunAudioTurn(ctx context.Context, audio []byte, speak bool) (voiceTurnResult, error) {
+	if len(audio) == 0 {
+		return voiceTurnResult{}, fmt.Errorf("audio is required")
+	}
+
+	if err := v.beginTextTurn(); err != nil {
+		return voiceTurnResult{}, err
+	}
+
+	turn, err := v.executeAudioTurn(ctx, "audio", audio, speak)
+	if err != nil {
+		v.failTurn()
+		return voiceTurnResult{}, err
+	}
+
+	v.finishTurn(&turn)
+	return turn, nil
+}
+
+func (v *voiceAgentService) executeAudioTurn(ctx context.Context, source string, audio []byte, speak bool) (voiceTurnResult, error) {
+	req := asrRequest{
+		SessionID: v.cfg.sessionID,
+		AudioFormat: audioFormat{
+			Encoding:     audioEncodingG711ULaw,
+			SampleRateHz: audioSampleRateHz,
+			Channels:     audioChannels,
+		},
+		AudioBase64: base64.StdEncoding.EncodeToString(audio),
+	}
+
+	asrResult, err := v.asr.Transcribe(ctx, req)
+	if err != nil {
+		return voiceTurnResult{}, err
+	}
+
+	text := strings.TrimSpace(asrResult.Text)
+	if text == "" {
+		return voiceTurnResult{}, fmt.Errorf("ASR returned empty text")
+	}
+
+	return v.executeTurn(ctx, source, text, len(audio), speak)
 }
 
 func (v *voiceAgentService) RunTextTurn(ctx context.Context, text string, speak bool) (voiceTurnResult, error) {

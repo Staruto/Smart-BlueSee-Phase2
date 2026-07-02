@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,11 @@ import (
 type voiceTurnRequest struct {
 	Text  string `json:"text"`
 	Speak *bool  `json:"speak,omitempty"`
+}
+
+type voiceAudioTurnRequest struct {
+	AudioBase64 string `json:"audio_base64"`
+	Speak       *bool  `json:"speak,omitempty"`
 }
 
 func (a *serverApp) handleHealthz(rw http.ResponseWriter, req *http.Request) {
@@ -54,6 +60,41 @@ func (a *serverApp) handleVoiceCommit(rw http.ResponseWriter, req *http.Request)
 	defer cancel()
 
 	turn, err := a.voice.CommitBufferedAudio(ctx, boolOrDefault(payload.Speak, true))
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, turn)
+}
+
+func (a *serverApp) handleVoiceAudioTurn(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeMethodNotAllowed(rw, http.MethodPost)
+		return
+	}
+
+	var payload voiceAudioTurnRequest
+	if err := decodeOptionalJSON(req, &payload); err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	if payload.AudioBase64 == "" {
+		writeJSON(rw, http.StatusBadRequest, map[string]any{"error": "audio_base64 is required"})
+		return
+	}
+
+	audio, err := base64.StdEncoding.DecodeString(payload.AudioBase64)
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]any{"error": "invalid audio_base64: " + err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(req.Context(), 90*time.Second)
+	defer cancel()
+
+	turn, err := a.voice.RunAudioTurn(ctx, audio, boolOrDefault(payload.Speak, false))
 	if err != nil {
 		writeJSON(rw, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return

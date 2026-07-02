@@ -33,6 +33,7 @@ Default behavior:
 - `GET /healthz`
 - `GET /api/voice/status`
 - `POST /api/voice/commit`
+- `POST /api/voice/audio-turn`
 - `POST /api/voice/text-turn`
 - `POST /api/voice/reset`
 
@@ -57,6 +58,18 @@ Invoke-RestMethod `
 ```
 
 The buffered commit endpoint uses whatever PCMU audio the ESP32 has already sent to the server over UDP.
+
+Example software-only audio turn:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8080/api/voice/audio-turn `
+  -ContentType 'application/json' `
+  -Body '{"audio_base64":"...","speak":false}'
+```
+
+The audio turn endpoint accepts base64 PCMU (`g711_ulaw`, 8 kHz, mono) and runs `ASR -> LLM -> TTS` without requiring ESP32 UDP audio. Use `speak:false` while ESP32 is offline.
 
 ## Backend modes
 
@@ -108,6 +121,14 @@ $env:VOICE_AGENT_TTS_ENDPOINT="http://127.0.0.1:8094/synthesize"
 ```
 
 For cloud-to-PC validation, replace `127.0.0.1:8094` with the same server-reachable tunnel or VPN address pattern used for the real LLM.
+
+Software-only validation order:
+
+1. Start the real LLM, local ASR/TTS adapter, and Go server on the PC.
+2. Call `/api/voice/text-turn` with `speak:false` to validate `LLM -> TTS`.
+3. Call adapter `/synthesize` to create base64 PCMU for a known phrase.
+4. Submit that base64 PCMU to `/api/voice/audio-turn` with `speak:false` to validate `ASR -> LLM -> TTS`.
+5. Move the Go server to cloud and repeat `/api/voice/text-turn` and `/api/voice/audio-turn` using server-reachable PC-local module URLs.
 
 ## Module contracts
 

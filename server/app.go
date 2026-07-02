@@ -89,6 +89,7 @@ func (a *serverApp) registerRoutes(mux *http.ServeMux) {
 	if a.voice != nil {
 		mux.HandleFunc("/api/voice/status", a.handleVoiceStatus)
 		mux.HandleFunc("/api/voice/commit", a.handleVoiceCommit)
+		mux.HandleFunc("/api/voice/audio-turn", a.handleVoiceAudioTurn)
 		mux.HandleFunc("/api/voice/text-turn", a.handleVoiceTextTurn)
 		mux.HandleFunc("/api/voice/reset", a.handleVoiceReset)
 	}
