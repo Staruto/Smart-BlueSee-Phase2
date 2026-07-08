@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net"
@@ -15,6 +16,11 @@ type udpBridge struct {
 	mu        sync.RWMutex
 	esp32Addr *net.UDPAddr
 }
+
+var (
+	udpHeartbeatPayload = bytes.Repeat([]byte{0xFF}, 160)
+	udpHeartbeatAck     = []byte("HB")
+)
 
 func newUDPBridge(listenAddr string, onInbound func([]byte)) (*udpBridge, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", listenAddr)
@@ -46,11 +52,22 @@ func (u *udpBridge) Serve() {
 
 		u.rememberESP32(addr)
 
+		if isUDPHeartbeat(buf[:n]) {
+			if _, err := u.conn.WriteToUDP(udpHeartbeatAck, addr); err != nil {
+				log.Printf("UDP heartbeat ACK to ESP32 %s failed: %v", addr.String(), err)
+			}
+			continue
+		}
+
 		if u.onInbound != nil {
 			chunk := append([]byte(nil), buf[:n]...)
 			u.onInbound(chunk)
 		}
 	}
+}
+
+func isUDPHeartbeat(payload []byte) bool {
+	return bytes.Equal(payload, udpHeartbeatPayload)
 }
 
 func (u *udpBridge) SendChunk(payload []byte) error {
