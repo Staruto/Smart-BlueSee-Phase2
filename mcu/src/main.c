@@ -27,6 +27,8 @@ static int afe_chunksize = 0;
 static int afe_channels = 0;
 static int16_t *aec_input = NULL;
 static int16_t *speaker_ref = NULL;
+
+
 // --- Hardware pins ---
 #define I2S_PORT      I2S_NUM_0
 #define I2S_BCLK      7
@@ -53,13 +55,56 @@ static int16_t *speaker_ref = NULL;
 #define I2S_DMA_BUF_COUNT 8
 #define I2S_DMA_BUF_LEN   256
 #define FRAME_MS          20
-#define MIC_GAIN          6
+#define MIC_GAIN          4
 #define VAD_SILENCE_HOLD_MS 1200
 #define VAD_START_CONSECUTIVE_FRAMES 5
-#define VAD_VOLUME_THRESHOLD_DB -32.0f
+#define VAD_VOLUME_THRESHOLD_DB -0.00001f
+#define DOWNLINK_GAIN 4
+#define BARGE_IN_VOLUME_THRESHOLD_DB -18.0f
+#define BARGE_IN_CONSECUTIVE_FRAMES 8
+#define PLAYBACK_ACTIVE_HOLD_MS 300
+#define AEC_REF_DELAY_MS 60
+#define AEC_REF_RING_MS 1000
+#define AEC_REF_RING_SAMPLES (SAMPLE_RATE * AEC_REF_RING_MS / 1000)
+#define AEC_REF_DELAY_SAMPLES (SAMPLE_RATE * AEC_REF_DELAY_MS / 1000)
+#define MAX_PLAY_SAMPLES (MAX_ULAW_PACKET_BYTES * (SAMPLE_RATE / UDP_AUDIO_RATE))
 #define VAD_DEBUG_LOG_MS 2000
 #define MAX_ULAW_PACKET_BYTES 1024
+#define ULAW_TX_FRAME_BYTES 160
+#define PCM_TX_FRAME_SAMPLES 320
 
+static int16_t ref_ring[AEC_REF_RING_SAMPLES];
+static int ref_write_pos = 0;
+
+static void ref_ring_push_block(const int16_t *pcm, int samples)
+{
+    if (!pcm || samples <= 0) {
+        return;
+    }
+
+    for (int i = 0; i < samples; i++) {
+        ref_ring[ref_write_pos] = pcm[i];
+        ref_write_pos++;
+        if (ref_write_pos >= AEC_REF_RING_SAMPLES) {
+            ref_write_pos = 0;
+        }
+    }
+}
+
+static int16_t ref_ring_get_delayed(int index_from_chunk_start, int chunk_size)
+{
+    int pos = ref_write_pos
+              - AEC_REF_DELAY_SAMPLES
+              - chunk_size
+              + index_from_chunk_start;
+
+    while (pos < 0) {
+        pos += AEC_REF_RING_SAMPLES;
+    }
+
+    pos %= AEC_REF_RING_SAMPLES;
+    return ref_ring[pos];
+}
 
 static EventGroupHandle_t s_wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
@@ -146,7 +191,7 @@ static void aec_init(void)
     cfg->aec_init = true;
     cfg->vad_init = true;
     cfg->vad_mode = VAD_MODE_1;
-    cfg->vad_min_speech_ms = 256;
+    cfg->vad_min_speech_ms = 1000;
     cfg->vad_min_noise_ms = VAD_SILENCE_HOLD_MS;
     cfg->vad_delay_ms = 128;
     cfg->vad_mute_playback = false;
@@ -165,24 +210,19 @@ static void aec_init(void)
         return;
     }
 
-    afe_chunksize =
-        afe_handle->get_feed_chunksize(
-            afe_data
-        );
+    afe_chunksize = afe_handle->get_feed_chunksize(afe_data);
 
-    afe_channels =
-        afe_handle->get_feed_channel_num(
-            afe_data
-        );
+    afe_channels = afe_handle->get_feed_channel_num(afe_data);
 
+    ESP_LOGI(TAG,"AEC chunk=%d channels=%d",afe_chunksize,afe_channels);
 
-    ESP_LOGI(
-        TAG,
-        "AEC chunk=%d channels=%d",
-        afe_chunksize,
-        afe_channels
-    );
+    if (afe_channels != 2) {
+        ESP_LOGE(TAG, "AEC feed channel mismatch: expected 2 channels mic+ref, got %d",afe_channels);
+        return;
+    }
 
+    memset(ref_ring, 0, sizeof(ref_ring));
+    ref_write_pos = 0;
 
     aec_input =
         malloc(
@@ -269,58 +309,60 @@ static int send_pcm_as_ulaw(int sock,
                             uint8_t *ulaw_buf,
                             size_t ulaw_buf_size)
 {
-    if (!pcm || samples <= 0 || ulaw_buf_size == 0) {
+    if (!pcm || samples <= 0 || ulaw_buf_size < ULAW_TX_FRAME_BYTES) {
         return 0;
     }
 
     const int step = SAMPLE_RATE / UDP_AUDIO_RATE;
+
     if (step <= 0 || (SAMPLE_RATE % UDP_AUDIO_RATE) != 0) {
         ESP_LOGE(TAG, "Unsupported SAMPLE_RATE=%d UDP_AUDIO_RATE=%d",
                  SAMPLE_RATE, UDP_AUDIO_RATE);
         return -1;
     }
 
-    int offset = 0;
-    int bytes_sent = 0;
-    while (offset < samples) {
-        int input_chunk = samples - offset;
-        int max_input = (int)ulaw_buf_size * step;
-        if (input_chunk > max_input) {
-            input_chunk = max_input;
-        }
+    int input_samples = samples;
 
-        int output_count = 0;
-        for (int i = 0; i + step - 1 < input_chunk; i += step) {
-            int32_t mixed = 0;
-            for (int j = 0; j < step; j++) {
-                mixed += pcm[offset + i + j];
-            }
-            mixed /= step;
-            ulaw_buf[output_count++] = encode_ulaw((int16_t)mixed);
-        }
-
-        if (output_count == 0) {
-            break;
-        }
-
-        ssize_t sent =
-            sendto(sock,
-                   ulaw_buf,
-                   output_count,
-                   0,
-                   (const struct sockaddr *)server_addr,
-                   sizeof(*server_addr));
-
-        if (sent < 0) {
-            ESP_LOGE(TAG, "UDP send audio failed, errno=%d", errno);
-            return bytes_sent > 0 ? bytes_sent : -1;
-        }
-
-        bytes_sent += sent;
-        offset += input_chunk;
+    if (input_samples > PCM_TX_FRAME_SAMPLES) {
+        input_samples = PCM_TX_FRAME_SAMPLES;
     }
 
-    return bytes_sent;
+    int output_count = 0;
+
+    for (int i = 0;
+         i + step - 1 < input_samples &&
+         output_count < ULAW_TX_FRAME_BYTES;
+         i += step)
+    {
+        int32_t mixed = 0;
+
+        for (int j = 0; j < step; j++) {
+            mixed += pcm[i + j];
+        }
+
+        mixed /= step;
+
+        ulaw_buf[output_count++] = encode_ulaw((int16_t)mixed);
+    }
+
+    if (output_count <= 0) {
+        return 0;
+    }
+
+    ssize_t sent =
+        sendto(sock,
+               ulaw_buf,
+               output_count,
+               0,
+               (const struct sockaddr *)server_addr,
+               sizeof(*server_addr));
+
+    if (sent < 0) {
+        ESP_LOGE(TAG, "UDP send audio failed, errno=%d", errno);
+        return -1;
+    }
+
+    return (int)sent;
 }
 
 static int send_udp_heartbeat(int sock,
@@ -353,6 +395,10 @@ static int send_udp_heartbeat(int sock,
 
 // Always enable recording (no GPIO switch in this build)
 
+static bool tick_before(TickType_t a, TickType_t b)
+{
+    return ((int32_t)(a - b) < 0);
+}
 
 static void udp_task(void *arg) {
     (void)arg;
@@ -396,6 +442,10 @@ static void udp_task(void *arg) {
 
     int32_t *i2s_read_buf =
         malloc(sizeof(int32_t) * afe_chunksize);
+    int32_t *i2s_out_buf =
+        malloc(sizeof(int32_t) * MAX_PLAY_SAMPLES);
+    int16_t *play_ref_buf =
+        malloc(sizeof(int16_t) * MAX_PLAY_SAMPLES);
     uint8_t rx_buf[MAX_ULAW_PACKET_BYTES];
     uint8_t ulaw_buf[MAX_ULAW_PACKET_BYTES];
     bool user_speaking = false;
@@ -408,11 +458,15 @@ static void udp_task(void *arg) {
     uint32_t tx_audio_packets = 0;
     uint32_t tx_heartbeat_packets = 0;
     uint32_t rx_packets = 0;
+    TickType_t playback_until_tick = 0;
+    int barge_in_frames = 0;
 
-    if (!i2s_read_buf || !aec_input || !speaker_ref) {
+    if (!i2s_read_buf || !i2s_out_buf || !play_ref_buf || !aec_input || !speaker_ref) {
         ESP_LOGE(TAG, "Audio buffers are not ready");
         close(sock);
         free(i2s_read_buf);
+        free(i2s_out_buf);
+        free(play_ref_buf);
         vTaskDelete(NULL);
         return;
     }
@@ -448,6 +502,140 @@ static void udp_task(void *arg) {
         last_status_tick = loop_now;
     }
 
+    int rx_played_this_loop = 0;
+
+    while (rx_played_this_loop < 1)
+    {
+        ssize_t len =
+            recvfrom(
+                sock,
+                rx_buf,
+                sizeof(rx_buf),
+                MSG_DONTWAIT,
+                NULL,
+                NULL
+            );
+
+        if (len <= 0)
+        {
+            break;
+        }
+
+        rx_packets++;
+
+        if (len == 2 &&
+            rx_buf[0] == UDP_HEARTBEAT_ACK_0 &&
+            rx_buf[1] == UDP_HEARTBEAT_ACK_1)
+        {
+            if (!server_rx_seen)
+            {
+                server_rx_seen = true;
+                ESP_LOGI(TAG,
+                        "UDP server heartbeat ACK received from %s:%d",
+                        UDP_SERVER_IP,
+                        UDP_SERVER_PORT);
+            }
+            continue;
+        }
+
+        if (!server_rx_seen)
+        {
+            server_rx_seen = true;
+            ESP_LOGI(TAG,
+                    "UDP server RX confirmed: first packet len=%d from %s:%d",
+                    (int)len,
+                    UDP_SERVER_IP,
+                    UDP_SERVER_PORT);
+        }
+
+        if (user_speaking)
+        {
+            rx_played_this_loop++;
+            continue;
+        }
+
+        if (len > MAX_ULAW_PACKET_BYTES)
+        {
+            len = MAX_ULAW_PACKET_BYTES;
+        }
+
+        int out_count = 0;
+        int upsample = SAMPLE_RATE / UDP_AUDIO_RATE;
+
+        if (upsample <= 0) {
+            upsample = 1;
+        }
+
+        for (int i = 0; i < len; i++)
+        {
+            int32_t sample = decode_ulaw(rx_buf[i]);
+            sample *= DOWNLINK_GAIN;
+
+            if (sample > 32767)
+                sample = 32767;
+            if (sample < -32768)
+                sample = -32768;
+
+            int16_t s16 = (int16_t)sample;
+
+            for (int j = 0;
+                j < upsample &&
+                out_count < MAX_PLAY_SAMPLES;
+                j++)
+            {
+                i2s_out_buf[out_count] = ((int32_t)s16) << 16;
+                play_ref_buf[out_count] = s16;
+                out_count++;
+            }
+        }
+
+        size_t bytes_written = 0;
+
+        int write_timeout_ms =
+            (out_count * 1000 / SAMPLE_RATE) + 20;
+
+        i2s_write(
+            I2S_PORT,
+            i2s_out_buf,
+            out_count * sizeof(int32_t),
+            &bytes_written,
+            pdMS_TO_TICKS(write_timeout_ms)
+        );
+
+        int written_samples = bytes_written / sizeof(int32_t);
+
+        if (written_samples > out_count) {
+            written_samples = out_count;
+        }
+
+        if (written_samples > 0) {
+            ref_ring_push_block(play_ref_buf, written_samples);
+
+            TickType_t now_tick = xTaskGetTickCount();
+
+            int written_ms =
+                (written_samples * 1000 + SAMPLE_RATE - 1) / SAMPLE_RATE;
+
+            TickType_t written_ticks = pdMS_TO_TICKS(written_ms);
+
+            if (playback_until_tick == 0 ||
+                !tick_before(now_tick, playback_until_tick)) {
+                playback_until_tick = now_tick;
+            }
+
+            playback_until_tick += written_ticks;
+        }
+
+        rx_played_this_loop++;
+
+        static int dbg_rx_cnt = 0;
+
+        if ((dbg_rx_cnt++ % 100) == 0)
+        {
+            ESP_LOGI(TAG, "Playing audio %d bytes", (int)len);
+        }
+    }
+
     size_t bytes_read = 0;
 
 
@@ -457,7 +645,7 @@ static void udp_task(void *arg) {
             i2s_read_buf,
             afe_chunksize * sizeof(int32_t),
             &bytes_read,
-            pdMS_TO_TICKS(100)
+            pdMS_TO_TICKS(20)
         );
 
 
@@ -479,8 +667,9 @@ static void udp_task(void *arg) {
                 mic = -32768;
             aec_input[2*i] =
                 (int16_t)mic;
+
             aec_input[2*i + 1] =
-                speaker_ref[i];
+                ref_ring_get_delayed(i, afe_chunksize);
         }
         afe_handle->feed(
             afe_data,
@@ -497,31 +686,38 @@ static void udp_task(void *arg) {
         result->data_size > 0)
         {
             TickType_t now = xTaskGetTickCount();
-            bool vad_speech =
+            bool playback_active =
+                (playback_until_tick != 0) &&
+                tick_before(now,
+                            playback_until_tick + pdMS_TO_TICKS(PLAYBACK_ACTIVE_HOLD_MS));
+
+            bool normal_vad_speech =
                 (result->vad_state == VAD_SPEECH) &&
                 (result->data_volume >= VAD_VOLUME_THRESHOLD_DB);
 
-            int samples =
-                result->data_size /
-                sizeof(int16_t);
+            bool barge_in_vad_speech =
+                (result->vad_state == VAD_SPEECH) &&
+                (result->data_volume >= BARGE_IN_VOLUME_THRESHOLD_DB);
 
-            if (vad_speech) {
-                last_speech_tick = now;
-                if (consecutive_speech_frames < VAD_START_CONSECUTIVE_FRAMES) {
-                    consecutive_speech_frames++;
+            if (playback_active && !user_speaking) {
+                if (barge_in_vad_speech) {
+                    if (barge_in_frames < BARGE_IN_CONSECUTIVE_FRAMES) {
+                        barge_in_frames++;
+                    }
+                } else {
+                    barge_in_frames = 0;
                 }
 
-                if (!user_speaking &&
-                    consecutive_speech_frames >= VAD_START_CONSECUTIVE_FRAMES) {
+                if (barge_in_frames >= BARGE_IN_CONSECUTIVE_FRAMES) {
                     user_speaking = true;
+                    last_speech_tick = now;
+                    consecutive_speech_frames = 0;
                     i2s_zero_dma_buffer(I2S_PORT);
-                    memset(speaker_ref,
-                           0,
-                           sizeof(int16_t) * afe_chunksize);
+
                     ESP_LOGI(TAG,
-                             "Voice detected: pause playback, volume=%.1f dB, frames=%d",
-                             result->data_volume,
-                             consecutive_speech_frames);
+                            "Barge-in confirmed: stop playback, volume=%.1f dB, frames=%d",
+                            result->data_volume,
+                            barge_in_frames);
 
                     if (result->vad_cache &&
                         result->vad_cache_size > 0) {
@@ -534,30 +730,73 @@ static void udp_task(void *arg) {
                                 ulaw_buf,
                                 sizeof(ulaw_buf)
                             );
+
                         if (sent > 0) {
                             tx_audio_packets++;
                         }
                     }
                 }
-            } else if (user_speaking &&
-                       (now - last_speech_tick) >
-                           pdMS_TO_TICKS(VAD_SILENCE_HOLD_MS)) {
-                user_speaking = false;
-                consecutive_speech_frames = 0;
-                ESP_LOGI(TAG, "Voice ended, resume playback");
-            } else if (!user_speaking) {
-                consecutive_speech_frames = 0;
+            } else {
+                barge_in_frames = 0;
+
+                if (normal_vad_speech) {
+                    last_speech_tick = now;
+
+                    if (consecutive_speech_frames < VAD_START_CONSECUTIVE_FRAMES) {
+                        consecutive_speech_frames++;
+                    }
+
+                    if (!user_speaking &&
+                        consecutive_speech_frames >= VAD_START_CONSECUTIVE_FRAMES) {
+                        user_speaking = true;
+
+                        ESP_LOGI(TAG,
+                                "Voice detected: volume=%.1f dB, frames=%d",
+                                result->data_volume,
+                                consecutive_speech_frames);
+
+                        if (result->vad_cache &&
+                            result->vad_cache_size > 0) {
+                            int sent =
+                                send_pcm_as_ulaw(
+                                    sock,
+                                    &server_addr,
+                                    result->vad_cache,
+                                    result->vad_cache_size / sizeof(int16_t),
+                                    ulaw_buf,
+                                    sizeof(ulaw_buf)
+                                );
+
+                            if (sent > 0) {
+                                tx_audio_packets++;
+                            }
+                        }
+                    }
+                } else if (user_speaking &&
+                        (now - last_speech_tick) >
+                            pdMS_TO_TICKS(VAD_SILENCE_HOLD_MS)) {
+                    user_speaking = false;
+                    consecutive_speech_frames = 0;
+                    barge_in_frames = 0;
+                    ESP_LOGI(TAG, "Voice ended, resume playback");
+                } else if (!user_speaking) {
+                    consecutive_speech_frames = 0;
+                }
             }
 
             if ((now - last_vad_debug_tick) >= pdMS_TO_TICKS(VAD_DEBUG_LOG_MS)) {
-                ESP_LOGI(TAG,
-                         "VAD debug: raw=%s, accepted=%s, volume=%.1f dB, frames=%d",
-                         result->vad_state == VAD_SPEECH ? "speech" : "silence",
-                         vad_speech ? "yes" : "no",
-                         result->data_volume,
-                         consecutive_speech_frames);
+                    ESP_LOGI(TAG,
+                            "VAD debug: raw=%s, normal=%s, barge=%s, playback=%s, volume=%.1f dB, frames=%d, barge_frames=%d",
+                            result->vad_state == VAD_SPEECH ? "speech" : "silence",
+                            normal_vad_speech ? "yes" : "no",
+                            barge_in_vad_speech ? "yes" : "no",
+                            playback_active ? "yes" : "no",
+                            result->data_volume,
+                            consecutive_speech_frames,
+                            barge_in_frames);
                 last_vad_debug_tick = now;
             }
+            int samples = result->data_size / sizeof(int16_t);
 
             if (user_speaking) {
                 int sent =
@@ -575,118 +814,11 @@ static void udp_task(void *arg) {
             }
         }
     }
-
-        // Use MSG_DONTWAIT to prevent hanging, and loop to drain buffer of all incoming WebRTC packets (which arrive every 20ms)
-        while (1)
-        {
-            ssize_t len =
-                recvfrom(
-                    sock,
-                    rx_buf,
-                    sizeof(rx_buf),
-                    MSG_DONTWAIT,
-                    NULL,
-                    NULL
-                );
-
-            if (len <= 0)
-            {
-                break;
-            }
-
-            rx_packets++;
-            if (len == 2 &&
-                rx_buf[0] == UDP_HEARTBEAT_ACK_0 &&
-                rx_buf[1] == UDP_HEARTBEAT_ACK_1)
-            {
-                if (!server_rx_seen)
-                {
-                    server_rx_seen = true;
-                    ESP_LOGI(TAG,
-                             "UDP server heartbeat ACK received from %s:%d",
-                             UDP_SERVER_IP,
-                             UDP_SERVER_PORT);
-                }
-                continue;
-            }
-
-            if (!server_rx_seen)
-            {
-                server_rx_seen = true;
-                ESP_LOGI(TAG,
-                         "UDP server RX confirmed: first packet len=%d from %s:%d",
-                         (int)len,
-                         UDP_SERVER_IP,
-                         UDP_SERVER_PORT);
-            }
-
-            if (user_speaking)
-            {
-                continue;
-            }
-
-            int32_t i2s_out[MAX_ULAW_PACKET_BYTES * (SAMPLE_RATE / UDP_AUDIO_RATE)];
-
-            if (len > MAX_ULAW_PACKET_BYTES)
-            {
-                len = MAX_ULAW_PACKET_BYTES;
-            }
-
-            int out_count = 0;
-            int upsample = SAMPLE_RATE / UDP_AUDIO_RATE;
-            if (upsample <= 0) {
-                upsample = 1;
-            }
-
-            for (int i = 0; i < len; i++)
-            {
-                int32_t sample =
-                    decode_ulaw(rx_buf[i]);
-                sample *= 12;
-                if (sample > 32767)
-                    sample = 32767;
-                if (sample < -32768)
-                    sample = -32768;
-                if (i < afe_chunksize)
-                {
-                    speaker_ref[i] =
-                        (int16_t)sample;
-                }
-
-                for (int j = 0;
-                     j < upsample &&
-                     out_count < (int)(sizeof(i2s_out) / sizeof(i2s_out[0]));
-                     j++)
-                {
-                    i2s_out[out_count++] =
-                        sample << 16;
-                }
-            }
-
-            size_t bytes_written = 0;
-
-            i2s_write(
-                I2S_PORT,
-                i2s_out,
-                out_count * sizeof(int32_t),
-                &bytes_written,
-                portMAX_DELAY
-            );
-
-            static int dbg_rx_cnt = 0;
-
-            if ((dbg_rx_cnt++ % 100) == 0)
-            {
-                ESP_LOGI(
-                    TAG,
-                    "Playing audio %d bytes",
-                    (int)len
-                );
-            }
-        }
-    }
+}
     close(sock);
     free(i2s_read_buf);
+    free(i2s_out_buf);
+    free(play_ref_buf);
     vTaskDelete(NULL);
 }
 
