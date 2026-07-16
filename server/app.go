@@ -68,9 +68,11 @@ func (a *serverApp) start() error {
 		)
 		if a.cfg.autoCommit {
 			log.Printf(
-				"Voice auto-commit enabled (idle=%s min_bytes=%d poll=%s)",
+				"Voice auto-commit enabled (idle=%s min_bytes=%d min_audio=%s min_rms_db=%.1f poll=%s)",
 				a.cfg.autoCommitIdle,
 				a.cfg.autoCommitMinBytes,
+				a.cfg.autoCommitMinAudio,
+				a.cfg.autoCommitMinRMSDB,
 				a.cfg.autoCommitPoll,
 			)
 			go a.runVoiceAutoCommitLoop()

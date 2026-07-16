@@ -81,6 +81,7 @@ func newTestVoiceAgent(asr ASRClient, agent AgentClient, tts TTSClient, playAudi
 		ttsBackend:         "test-tts",
 		autoCommitIdle:     1500 * time.Millisecond,
 		autoCommitMinBytes: 4,
+		autoCommitMinRMSDB: -100,
 	}
 	return newVoiceAgentService(cfg, asr, agent, tts, playAudio)
 }
@@ -189,6 +190,29 @@ func TestCommitBufferedAudioRequiresBuffer(t *testing.T) {
 	}
 }
 
+func TestCommitBufferedAudioDropsBufferOnEmptyASR(t *testing.T) {
+	voice := newTestVoiceAgent(
+		&fakeASRClient{text: ""},
+		fakeAgentClient{},
+		fakeTTSClient{},
+		nil,
+	)
+	voice.IngestAudio([]byte{9, 8, 7, 6})
+
+	_, err := voice.CommitBufferedAudioAuto(context.Background(), false)
+	if !errors.Is(err, errASREmptyText) {
+		t.Fatalf("CommitBufferedAudioAuto error = %v, want errASREmptyText", err)
+	}
+
+	status := voice.Status("")
+	if status.Processing {
+		t.Fatalf("Processing = true after empty ASR")
+	}
+	if status.BufferedAudioBytes != 0 {
+		t.Fatalf("BufferedAudioBytes = %d, want 0", status.BufferedAudioBytes)
+	}
+}
+
 func TestCommitBufferedAudioAutoReportsTriggerAndPlaybackTiming(t *testing.T) {
 	voice := newTestVoiceAgent(
 		&fakeASRClient{text: "auto audio", meta: map[string]any{"latency_ms": json.Number("23")}},
@@ -225,6 +249,31 @@ func TestCommitBufferedAudioAutoReportsTriggerAndPlaybackTiming(t *testing.T) {
 	}
 }
 
+func TestShouldAutoCommitDropsLowEnergyBufferedAudio(t *testing.T) {
+	cfg := config{
+		sessionID:          "test-session",
+		systemPrompt:       "test prompt",
+		asrBackend:         "test-asr",
+		llmBackend:         "test-llm",
+		ttsBackend:         "test-tts",
+		autoCommitIdle:     1500 * time.Millisecond,
+		autoCommitMinBytes: 4000,
+		autoCommitMinAudio: 800 * time.Millisecond,
+		autoCommitMinRMSDB: -45,
+	}
+	voice := newVoiceAgentService(cfg, &fakeASRClient{text: "unused"}, fakeAgentClient{}, fakeTTSClient{}, nil)
+	voice.IngestAudio(bytesOf(0xFF, 8000))
+
+	if voice.ShouldAutoCommit(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("ShouldAutoCommit = true for low-energy silence")
+	}
+
+	status := voice.Status("")
+	if status.BufferedAudioBytes != 0 {
+		t.Fatalf("BufferedAudioBytes = %d, want low-energy buffer discarded", status.BufferedAudioBytes)
+	}
+}
+
 func TestShouldAutoCommitHonorsIdleAndMinBytes(t *testing.T) {
 	voice := newTestVoiceAgent(&fakeASRClient{text: "unused"}, fakeAgentClient{}, fakeTTSClient{}, nil)
 	now := time.Now()
@@ -258,4 +307,12 @@ func TestShouldAutoCommitSkipsBusyTurn(t *testing.T) {
 	if voice.ShouldAutoCommit(time.Now().Add(2 * time.Second)) {
 		t.Fatalf("ShouldAutoCommit = true while busy")
 	}
+}
+
+func bytesOf(value byte, count int) []byte {
+	payload := make([]byte, count)
+	for i := range payload {
+		payload[i] = value
+	}
+	return payload
 }

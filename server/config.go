@@ -27,6 +27,8 @@ type config struct {
 	autoCommit         bool
 	autoCommitIdle     time.Duration
 	autoCommitMinBytes int
+	autoCommitMinAudio time.Duration
+	autoCommitMinRMSDB float64
 	autoCommitPoll     time.Duration
 	ttsFrameBytes      int
 	ttsFrameDelay      time.Duration
@@ -53,6 +55,8 @@ func loadConfig() config {
 		autoCommit:         envBoolOrDefault("VOICE_AGENT_AUTO_COMMIT", false),
 		autoCommitIdle:     envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_IDLE", 1500*time.Millisecond),
 		autoCommitMinBytes: envIntOrDefault("VOICE_AGENT_AUTO_COMMIT_MIN_BYTES", 4000),
+		autoCommitMinAudio: envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_MIN_AUDIO", 800*time.Millisecond),
+		autoCommitMinRMSDB: envFloatOrDefault("VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB", -45),
 		autoCommitPoll:     envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_POLL", 200*time.Millisecond),
 		ttsFrameBytes:      envIntOrDefault("VOICE_AGENT_TTS_FRAME_BYTES", 160),
 		ttsFrameDelay:      envDurationOrDefault("VOICE_AGENT_TTS_FRAME_DELAY", 20*time.Millisecond),
@@ -77,6 +81,8 @@ func loadConfig() config {
 	flag.BoolVar(&cfg.autoCommit, "auto-commit", cfg.autoCommit, "Automatically commit buffered ESP32 audio after idle")
 	flag.DurationVar(&cfg.autoCommitIdle, "auto-commit-idle", cfg.autoCommitIdle, "Idle duration before auto-committing buffered audio")
 	flag.IntVar(&cfg.autoCommitMinBytes, "auto-commit-min-bytes", cfg.autoCommitMinBytes, "Minimum buffered audio bytes required for auto-commit")
+	flag.DurationVar(&cfg.autoCommitMinAudio, "auto-commit-min-audio", cfg.autoCommitMinAudio, "Minimum buffered audio duration required for auto-commit")
+	flag.Float64Var(&cfg.autoCommitMinRMSDB, "auto-commit-min-rms-db", cfg.autoCommitMinRMSDB, "Minimum buffered PCMU RMS dBFS required for auto-commit; set to -100 or lower to disable")
 	flag.DurationVar(&cfg.autoCommitPoll, "auto-commit-poll", cfg.autoCommitPoll, "Polling interval for auto-commit checks")
 	flag.IntVar(&cfg.ttsFrameBytes, "tts-frame-bytes", cfg.ttsFrameBytes, "Chunk size used when streaming synthesized audio back to ESP32")
 	flag.DurationVar(&cfg.ttsFrameDelay, "tts-frame-delay", cfg.ttsFrameDelay, "Delay between synthesized audio chunks sent to ESP32")
@@ -112,6 +118,19 @@ func envIntOrDefault(name string, fallback int) int {
 	}
 
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloatOrDefault(name string, fallback float64) float64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}

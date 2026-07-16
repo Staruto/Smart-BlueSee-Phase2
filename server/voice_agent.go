@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,7 +21,10 @@ const (
 	audioSampleRateHz     = 8000
 	audioChannels         = 1
 	maxHistoryMessages    = 12
+	disableAutoCommitRMS  = -100
 )
+
+var errASREmptyText = errors.New("ASR returned empty text")
 
 type audioFormat struct {
 	Encoding     string `json:"encoding"`
@@ -100,6 +104,7 @@ type voiceTurnTiming struct {
 	PlaybackSendMs   int    `json:"playback_send_ms,omitempty"`
 	AutoCommitIdleMs int    `json:"auto_commit_idle_ms,omitempty"`
 	BufferAgeMs      int    `json:"buffer_age_ms,omitempty"`
+	InputAudioMs     int    `json:"input_audio_ms,omitempty"`
 }
 
 type voiceTurnResult struct {
@@ -124,6 +129,8 @@ type voiceStatus struct {
 	AutoCommit         bool              `json:"auto_commit"`
 	AutoCommitIdleMs   int               `json:"auto_commit_idle_ms,omitempty"`
 	AutoCommitMinBytes int               `json:"auto_commit_min_bytes,omitempty"`
+	AutoCommitMinAudio int               `json:"auto_commit_min_audio_ms,omitempty"`
+	AutoCommitMinRMSDB float64           `json:"auto_commit_min_rms_db,omitempty"`
 	LastTurn           *voiceTurnResult  `json:"last_turn,omitempty"`
 }
 
@@ -190,6 +197,8 @@ func (v *voiceAgentService) Status(esp32Endpoint string) voiceStatus {
 		AutoCommit:         v.cfg.autoCommit,
 		AutoCommitIdleMs:   int(v.cfg.autoCommitIdle / time.Millisecond),
 		AutoCommitMinBytes: v.cfg.autoCommitMinBytes,
+		AutoCommitMinAudio: int(v.cfg.autoCommitMinAudio / time.Millisecond),
+		AutoCommitMinRMSDB: v.cfg.autoCommitMinRMSDB,
 	}
 	if v.lastTurn != nil {
 		turnCopy := *v.lastTurn
@@ -215,7 +224,21 @@ func (v *voiceAgentService) ShouldAutoCommit(now time.Time) bool {
 	if v.busy || len(v.buffer) < v.cfg.autoCommitMinBytes || v.lastAudioAt.IsZero() {
 		return false
 	}
-	return now.Sub(v.lastAudioAt) >= v.cfg.autoCommitIdle
+	if now.Sub(v.lastAudioAt) < v.cfg.autoCommitIdle {
+		return false
+	}
+
+	if v.cfg.autoCommitMinAudio > 0 && pcmuDuration(v.buffer) < v.cfg.autoCommitMinAudio {
+		v.discardBufferedAudioLocked()
+		return false
+	}
+
+	if autoCommitRMSGateEnabled(v.cfg.autoCommitMinRMSDB) && pcmuRMSDBFS(v.buffer) < v.cfg.autoCommitMinRMSDB {
+		v.discardBufferedAudioLocked()
+		return false
+	}
+
+	return true
 }
 
 func (v *voiceAgentService) CommitBufferedAudio(ctx context.Context, speak bool) (voiceTurnResult, error) {
@@ -237,10 +260,15 @@ func (v *voiceAgentService) commitBufferedAudio(ctx context.Context, speak bool,
 		Trigger:          trigger,
 		BufferAgeMs:      durationMillis(bufferAge),
 		AutoCommitIdleMs: autoCommitIdleMs(trigger, v.cfg.autoCommitIdle),
+		InputAudioMs:     durationMillis(pcmuDuration(snapshot)),
 	}
 	turn, err := v.executeAudioTurn(ctx, "audio", snapshot, speak, timing)
 	if err != nil {
-		v.restoreBufferedAudio(snapshot)
+		if errors.Is(err, errASREmptyText) {
+			v.discardBufferedTurn()
+		} else {
+			v.restoreBufferedAudio(snapshot)
+		}
 		return voiceTurnResult{}, err
 	}
 
@@ -292,7 +320,7 @@ func (v *voiceAgentService) executeAudioTurn(ctx context.Context, source string,
 
 	text := strings.TrimSpace(asrResult.Text)
 	if text == "" {
-		return voiceTurnResult{}, fmt.Errorf("ASR returned empty text")
+		return voiceTurnResult{}, errASREmptyText
 	}
 
 	return v.executeTurn(ctx, source, text, len(audio), speak, timing)
@@ -358,6 +386,20 @@ func (v *voiceAgentService) restoreBufferedAudio(snapshot []byte) {
 	defer v.mu.Unlock()
 	v.buffer = append(snapshot, v.buffer...)
 	v.busy = false
+}
+
+func (v *voiceAgentService) discardBufferedTurn() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.busy = false
+	if len(v.buffer) == 0 {
+		v.lastAudioAt = time.Time{}
+	}
+}
+
+func (v *voiceAgentService) discardBufferedAudioLocked() {
+	v.buffer = nil
+	v.lastAudioAt = time.Time{}
 }
 
 func (v *voiceAgentService) failTurn() {
@@ -817,6 +859,45 @@ func cloneVoiceTurnTiming(timing *voiceTurnTiming) *voiceTurnTiming {
 	}
 	copy := *timing
 	return &copy
+}
+
+func pcmuDuration(payload []byte) time.Duration {
+	if len(payload) == 0 {
+		return 0
+	}
+	return time.Duration(len(payload)) * time.Second / audioSampleRateHz
+}
+
+func autoCommitRMSGateEnabled(thresholdDB float64) bool {
+	return thresholdDB > disableAutoCommitRMS
+}
+
+func pcmuRMSDBFS(payload []byte) float64 {
+	if len(payload) == 0 {
+		return math.Inf(-1)
+	}
+
+	var sumSquares float64
+	for _, sample := range payload {
+		pcm := float64(decodeULaw(sample))
+		sumSquares += pcm * pcm
+	}
+
+	rms := math.Sqrt(sumSquares / float64(len(payload)))
+	if rms <= 0 {
+		return math.Inf(-1)
+	}
+	return 20 * math.Log10(rms/32768)
+}
+
+func decodeULaw(sample byte) int16 {
+	u := ^sample
+	t := int((u&0x0F)<<3) + 0x84
+	t <<= (u & 0x70) >> 4
+	if u&0x80 != 0 {
+		return int16(0x84 - t)
+	}
+	return int16(t - 0x84)
 }
 
 func synthesizeMockTone(text string) []byte {
