@@ -96,18 +96,27 @@ func (a *serverApp) runVoiceAutoCommitLoop() {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		turn, err := a.voice.CommitBufferedAudio(ctx, true)
+		turn, err := a.voice.CommitBufferedAudioAuto(ctx, true)
 		cancel()
 		if err != nil {
 			log.Printf("Voice auto-commit failed: %v", err)
 			continue
 		}
 
+		timing := turn.Timing
+		if timing == nil {
+			timing = &voiceTurnTiming{}
+		}
 		log.Printf(
-			"Voice auto-commit completed: turn=%d input_bytes=%d output_bytes=%d input=%q reply=%q",
+			"Voice auto-commit completed: turn=%d input_bytes=%d output_bytes=%d total_ms=%d asr_ms=%d llm_ms=%d tts_ms=%d playback_ms=%d input=%q reply=%q",
 			turn.TurnID,
 			turn.InputAudioBytes,
 			turn.OutputAudioBytes,
+			timing.TotalMs,
+			timing.ASRTotalMs,
+			timing.LLMTotalMs,
+			timing.TTSTotalMs,
+			timing.PlaybackSendMs,
 			turn.InputText,
 			turn.ReplyText,
 		)

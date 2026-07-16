@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -12,10 +13,15 @@ import (
 type fakeASRClient struct {
 	text         string
 	err          error
+	meta         map[string]any
+	sleep        time.Duration
 	lastAudioLen int
 }
 
 func (f *fakeASRClient) Transcribe(_ context.Context, req asrRequest) (asrResult, error) {
+	if f.sleep > 0 {
+		time.Sleep(f.sleep)
+	}
 	audio, err := base64.StdEncoding.DecodeString(req.AudioBase64)
 	if err != nil {
 		return asrResult{}, err
@@ -24,14 +30,18 @@ func (f *fakeASRClient) Transcribe(_ context.Context, req asrRequest) (asrResult
 	if f.err != nil {
 		return asrResult{}, f.err
 	}
-	return asrResult{Text: f.text, Final: true}, nil
+	return asrResult{Text: f.text, Final: true, Meta: f.meta}, nil
 }
 
 type fakeAgentClient struct {
-	err error
+	err   error
+	sleep time.Duration
 }
 
 func (f fakeAgentClient) Run(_ context.Context, req agentRequest) (agentResult, error) {
+	if f.sleep > 0 {
+		time.Sleep(f.sleep)
+	}
 	if f.err != nil {
 		return agentResult{}, f.err
 	}
@@ -47,14 +57,19 @@ func (f fakeAgentClient) Run(_ context.Context, req agentRequest) (agentResult, 
 }
 
 type fakeTTSClient struct {
-	err error
+	err   error
+	meta  map[string]any
+	sleep time.Duration
 }
 
 func (f fakeTTSClient) Synthesize(_ context.Context, req ttsRequest) (ttsResult, error) {
+	if f.sleep > 0 {
+		time.Sleep(f.sleep)
+	}
 	if f.err != nil {
 		return ttsResult{}, f.err
 	}
-	return ttsResult{Audio: []byte("pcmu:" + req.Text)}, nil
+	return ttsResult{Audio: []byte("pcmu:" + req.Text), Meta: f.meta}, nil
 }
 
 func newTestVoiceAgent(asr ASRClient, agent AgentClient, tts TTSClient, playAudio func([]byte) error) *voiceAgentService {
@@ -71,8 +86,13 @@ func newTestVoiceAgent(asr ASRClient, agent AgentClient, tts TTSClient, playAudi
 }
 
 func TestRunAudioTurnExecutesASRLLMTTS(t *testing.T) {
-	asr := &fakeASRClient{text: "hello from audio"}
-	voice := newTestVoiceAgent(asr, fakeAgentClient{}, fakeTTSClient{}, nil)
+	asr := &fakeASRClient{text: "hello from audio", meta: map[string]any{"latency_ms": 12}, sleep: time.Millisecond}
+	voice := newTestVoiceAgent(
+		asr,
+		fakeAgentClient{sleep: time.Millisecond},
+		fakeTTSClient{meta: map[string]any{"latency_ms": 34}, sleep: time.Millisecond},
+		nil,
+	)
 
 	turn, err := voice.RunAudioTurn(context.Background(), []byte{1, 2, 3, 4}, false)
 	if err != nil {
@@ -97,6 +117,21 @@ func TestRunAudioTurnExecutesASRLLMTTS(t *testing.T) {
 	if asr.lastAudioLen != 4 {
 		t.Fatalf("ASR saw %d audio bytes, want 4", asr.lastAudioLen)
 	}
+	if turn.Timing == nil {
+		t.Fatalf("Timing is nil")
+	}
+	if turn.Timing.Trigger != "audio_turn" {
+		t.Fatalf("Timing.Trigger = %q, want audio_turn", turn.Timing.Trigger)
+	}
+	if turn.Timing.TotalMs == 0 || turn.Timing.ASRTotalMs == 0 || turn.Timing.LLMTotalMs == 0 || turn.Timing.TTSTotalMs == 0 {
+		t.Fatalf("Timing missing total stage durations: %#v", turn.Timing)
+	}
+	if turn.Timing.ASRBackendMs != 12 {
+		t.Fatalf("ASRBackendMs = %d, want 12", turn.Timing.ASRBackendMs)
+	}
+	if turn.Timing.TTSBackendMs != 34 {
+		t.Fatalf("TTSBackendMs = %d, want 34", turn.Timing.TTSBackendMs)
+	}
 
 	status := voice.Status("")
 	if status.Processing {
@@ -107,6 +142,9 @@ func TestRunAudioTurnExecutesASRLLMTTS(t *testing.T) {
 	}
 	if status.LastTurn == nil || status.LastTurn.TurnID != 1 {
 		t.Fatalf("LastTurn not populated correctly: %#v", status.LastTurn)
+	}
+	if status.LastTurn.Timing == nil || status.LastTurn.Timing.Trigger != "audio_turn" {
+		t.Fatalf("LastTurn timing not populated correctly: %#v", status.LastTurn.Timing)
 	}
 }
 
@@ -148,6 +186,42 @@ func TestCommitBufferedAudioRequiresBuffer(t *testing.T) {
 	_, err := voice.CommitBufferedAudio(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "no buffered audio available") {
 		t.Fatalf("CommitBufferedAudio error = %v, want no buffered audio available", err)
+	}
+}
+
+func TestCommitBufferedAudioAutoReportsTriggerAndPlaybackTiming(t *testing.T) {
+	voice := newTestVoiceAgent(
+		&fakeASRClient{text: "auto audio", meta: map[string]any{"latency_ms": json.Number("23")}},
+		fakeAgentClient{sleep: time.Millisecond},
+		fakeTTSClient{meta: map[string]any{"latency_ms": float64(45)}, sleep: time.Millisecond},
+		func(_ []byte) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		},
+	)
+	voice.IngestAudio([]byte{1, 2, 3, 4})
+
+	turn, err := voice.CommitBufferedAudioAuto(context.Background(), true)
+	if err != nil {
+		t.Fatalf("CommitBufferedAudioAuto returned error: %v", err)
+	}
+	if turn.Timing == nil {
+		t.Fatalf("Timing is nil")
+	}
+	if turn.Timing.Trigger != "auto_commit" {
+		t.Fatalf("Trigger = %q, want auto_commit", turn.Timing.Trigger)
+	}
+	if turn.Timing.AutoCommitIdleMs != 1500 {
+		t.Fatalf("AutoCommitIdleMs = %d, want 1500", turn.Timing.AutoCommitIdleMs)
+	}
+	if turn.Timing.PlaybackSendMs == 0 {
+		t.Fatalf("PlaybackSendMs = 0, want non-zero")
+	}
+	if turn.Timing.ASRBackendMs != 23 {
+		t.Fatalf("ASRBackendMs = %d, want 23", turn.Timing.ASRBackendMs)
+	}
+	if turn.Timing.TTSBackendMs != 45 {
+		t.Fatalf("TTSBackendMs = %d, want 45", turn.Timing.TTSBackendMs)
 	}
 }
 

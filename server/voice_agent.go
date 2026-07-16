@@ -89,6 +89,19 @@ type ttsResult struct {
 	Meta  map[string]any `json:"meta,omitempty"`
 }
 
+type voiceTurnTiming struct {
+	Trigger          string `json:"trigger"`
+	TotalMs          int    `json:"total_ms"`
+	ASRTotalMs       int    `json:"asr_total_ms,omitempty"`
+	ASRBackendMs     int    `json:"asr_backend_ms,omitempty"`
+	LLMTotalMs       int    `json:"llm_total_ms,omitempty"`
+	TTSTotalMs       int    `json:"tts_total_ms,omitempty"`
+	TTSBackendMs     int    `json:"tts_backend_ms,omitempty"`
+	PlaybackSendMs   int    `json:"playback_send_ms,omitempty"`
+	AutoCommitIdleMs int    `json:"auto_commit_idle_ms,omitempty"`
+	BufferAgeMs      int    `json:"buffer_age_ms,omitempty"`
+}
+
 type voiceTurnResult struct {
 	TurnID           int              `json:"turn_id"`
 	CreatedAt        time.Time        `json:"created_at"`
@@ -98,6 +111,7 @@ type voiceTurnResult struct {
 	InputAudioBytes  int              `json:"input_audio_bytes"`
 	OutputAudioBytes int              `json:"output_audio_bytes"`
 	Trace            []agentTraceStep `json:"trace,omitempty"`
+	Timing           *voiceTurnTiming `json:"timing,omitempty"`
 }
 
 type voiceStatus struct {
@@ -205,17 +219,32 @@ func (v *voiceAgentService) ShouldAutoCommit(now time.Time) bool {
 }
 
 func (v *voiceAgentService) CommitBufferedAudio(ctx context.Context, speak bool) (voiceTurnResult, error) {
-	snapshot, err := v.beginBufferedTurn()
+	return v.commitBufferedAudio(ctx, speak, "manual_commit")
+}
+
+func (v *voiceAgentService) CommitBufferedAudioAuto(ctx context.Context, speak bool) (voiceTurnResult, error) {
+	return v.commitBufferedAudio(ctx, speak, "auto_commit")
+}
+
+func (v *voiceAgentService) commitBufferedAudio(ctx context.Context, speak bool, trigger string) (voiceTurnResult, error) {
+	started := time.Now()
+	snapshot, bufferAge, err := v.beginBufferedTurn()
 	if err != nil {
 		return voiceTurnResult{}, err
 	}
 
-	turn, err := v.executeAudioTurn(ctx, "audio", snapshot, speak)
+	timing := &voiceTurnTiming{
+		Trigger:          trigger,
+		BufferAgeMs:      durationMillis(bufferAge),
+		AutoCommitIdleMs: autoCommitIdleMs(trigger, v.cfg.autoCommitIdle),
+	}
+	turn, err := v.executeAudioTurn(ctx, "audio", snapshot, speak, timing)
 	if err != nil {
 		v.restoreBufferedAudio(snapshot)
 		return voiceTurnResult{}, err
 	}
 
+	turn.Timing.TotalMs = elapsedMillis(started)
 	v.finishTurn(&turn)
 	return turn, nil
 }
@@ -229,17 +258,20 @@ func (v *voiceAgentService) RunAudioTurn(ctx context.Context, audio []byte, spea
 		return voiceTurnResult{}, err
 	}
 
-	turn, err := v.executeAudioTurn(ctx, "audio", audio, speak)
+	started := time.Now()
+	timing := &voiceTurnTiming{Trigger: "audio_turn"}
+	turn, err := v.executeAudioTurn(ctx, "audio", audio, speak, timing)
 	if err != nil {
 		v.failTurn()
 		return voiceTurnResult{}, err
 	}
 
+	turn.Timing.TotalMs = elapsedMillis(started)
 	v.finishTurn(&turn)
 	return turn, nil
 }
 
-func (v *voiceAgentService) executeAudioTurn(ctx context.Context, source string, audio []byte, speak bool) (voiceTurnResult, error) {
+func (v *voiceAgentService) executeAudioTurn(ctx context.Context, source string, audio []byte, speak bool, timing *voiceTurnTiming) (voiceTurnResult, error) {
 	req := asrRequest{
 		SessionID: v.cfg.sessionID,
 		AudioFormat: audioFormat{
@@ -250,17 +282,20 @@ func (v *voiceAgentService) executeAudioTurn(ctx context.Context, source string,
 		AudioBase64: base64.StdEncoding.EncodeToString(audio),
 	}
 
+	asrStarted := time.Now()
 	asrResult, err := v.asr.Transcribe(ctx, req)
+	timing.ASRTotalMs = elapsedMillis(asrStarted)
 	if err != nil {
 		return voiceTurnResult{}, err
 	}
+	timing.ASRBackendMs = metaLatencyMillis(asrResult.Meta)
 
 	text := strings.TrimSpace(asrResult.Text)
 	if text == "" {
 		return voiceTurnResult{}, fmt.Errorf("ASR returned empty text")
 	}
 
-	return v.executeTurn(ctx, source, text, len(audio), speak)
+	return v.executeTurn(ctx, source, text, len(audio), speak, timing)
 }
 
 func (v *voiceAgentService) RunTextTurn(ctx context.Context, text string, speak bool) (voiceTurnResult, error) {
@@ -272,31 +307,38 @@ func (v *voiceAgentService) RunTextTurn(ctx context.Context, text string, speak 
 		return voiceTurnResult{}, err
 	}
 
-	turn, err := v.executeTurn(ctx, "text", text, 0, speak)
+	started := time.Now()
+	timing := &voiceTurnTiming{Trigger: "text_turn"}
+	turn, err := v.executeTurn(ctx, "text", text, 0, speak, timing)
 	if err != nil {
 		v.failTurn()
 		return voiceTurnResult{}, err
 	}
 
+	turn.Timing.TotalMs = elapsedMillis(started)
 	v.finishTurn(&turn)
 	return turn, nil
 }
 
-func (v *voiceAgentService) beginBufferedTurn() ([]byte, error) {
+func (v *voiceAgentService) beginBufferedTurn() ([]byte, time.Duration, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
 	if v.busy {
-		return nil, fmt.Errorf("voice agent already processing a turn")
+		return nil, 0, fmt.Errorf("voice agent already processing a turn")
 	}
 	if len(v.buffer) == 0 {
-		return nil, fmt.Errorf("no buffered audio available")
+		return nil, 0, fmt.Errorf("no buffered audio available")
 	}
 
 	snapshot := append([]byte(nil), v.buffer...)
+	bufferAge := time.Duration(0)
+	if !v.lastAudioAt.IsZero() {
+		bufferAge = time.Since(v.lastAudioAt)
+	}
 	v.buffer = nil
 	v.busy = true
-	return snapshot, nil
+	return snapshot, bufferAge, nil
 }
 
 func (v *voiceAgentService) beginTextTurn() error {
@@ -341,10 +383,11 @@ func (v *voiceAgentService) finishTurn(turn *voiceTurnResult) {
 		InputAudioBytes:  turn.InputAudioBytes,
 		OutputAudioBytes: turn.OutputAudioBytes,
 		Trace:            append([]agentTraceStep(nil), turn.Trace...),
+		Timing:           cloneVoiceTurnTiming(turn.Timing),
 	}
 }
 
-func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text string, inputAudioBytes int, speak bool) (voiceTurnResult, error) {
+func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text string, inputAudioBytes int, speak bool, timing *voiceTurnTiming) (voiceTurnResult, error) {
 	messages := v.buildMessages(text)
 	agentReq := agentRequest{
 		SessionID:       v.cfg.sessionID,
@@ -360,7 +403,9 @@ func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text
 		},
 	}
 
+	llmStarted := time.Now()
 	agentResp, err := v.agent.Run(ctx, agentReq)
+	timing.LLMTotalMs = elapsedMillis(llmStarted)
 	if err != nil {
 		return voiceTurnResult{}, err
 	}
@@ -370,6 +415,7 @@ func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text
 		return voiceTurnResult{}, fmt.Errorf("LLM returned empty reply")
 	}
 
+	ttsStarted := time.Now()
 	synthResp, err := v.tts.Synthesize(ctx, ttsRequest{
 		SessionID: v.cfg.sessionID,
 		Text:      replyText,
@@ -379,14 +425,18 @@ func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text
 			Channels:     audioChannels,
 		},
 	})
+	timing.TTSTotalMs = elapsedMillis(ttsStarted)
 	if err != nil {
 		return voiceTurnResult{}, err
 	}
+	timing.TTSBackendMs = metaLatencyMillis(synthResp.Meta)
 
 	if speak && len(synthResp.Audio) > 0 {
+		playbackStarted := time.Now()
 		if err := v.playAudio(synthResp.Audio); err != nil {
 			return voiceTurnResult{}, err
 		}
+		timing.PlaybackSendMs = elapsedMillis(playbackStarted)
 	}
 
 	v.appendHistory(text, replyText)
@@ -398,6 +448,7 @@ func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text
 		InputAudioBytes:  inputAudioBytes,
 		OutputAudioBytes: len(synthResp.Audio),
 		Trace:            agentResp.Trace,
+		Timing:           timing,
 	}
 	return turn, nil
 }
@@ -693,6 +744,79 @@ func postJSON(ctx context.Context, client *http.Client, endpoint string, request
 		return err
 	}
 	return nil
+}
+
+func elapsedMillis(started time.Time) int {
+	return durationMillis(time.Since(started))
+}
+
+func durationMillis(duration time.Duration) int {
+	if duration <= 0 {
+		return 0
+	}
+	millis := int(duration / time.Millisecond)
+	if millis == 0 {
+		return 1
+	}
+	return millis
+}
+
+func metaLatencyMillis(meta map[string]any) int {
+	if meta == nil {
+		return 0
+	}
+
+	value, ok := meta["latency_ms"]
+	if !ok {
+		return 0
+	}
+
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case json.Number:
+		asInt, err := typed.Int64()
+		if err == nil {
+			return int(asInt)
+		}
+		asFloat, err := typed.Float64()
+		if err == nil {
+			return int(asFloat)
+		}
+	case string:
+		var number json.Number = json.Number(strings.TrimSpace(typed))
+		asInt, err := number.Int64()
+		if err == nil {
+			return int(asInt)
+		}
+		asFloat, err := number.Float64()
+		if err == nil {
+			return int(asFloat)
+		}
+	}
+
+	return 0
+}
+
+func autoCommitIdleMs(trigger string, idle time.Duration) int {
+	if trigger != "auto_commit" {
+		return 0
+	}
+	return durationMillis(idle)
+}
+
+func cloneVoiceTurnTiming(timing *voiceTurnTiming) *voiceTurnTiming {
+	if timing == nil {
+		return nil
+	}
+	copy := *timing
+	return &copy
 }
 
 func synthesizeMockTone(text string) []byte {
