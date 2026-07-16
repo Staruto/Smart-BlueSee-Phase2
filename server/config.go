@@ -8,46 +8,54 @@ import (
 )
 
 type config struct {
-	httpAddr         string
-	udpAddr          string
-	webDir           string
-	enableWebRTC     bool
-	enableVoiceAgent bool
-	sessionID        string
-	systemPrompt     string
-	asrBackend       string
-	asrEndpoint      string
-	llmBackend       string
-	llmEndpoint      string
-	llmModel         string
-	llmMaxTokens     int
-	ttsBackend       string
-	ttsEndpoint      string
-	mockASRText      string
-	ttsFrameBytes    int
-	ttsFrameDelay    time.Duration
+	httpAddr           string
+	udpAddr            string
+	webDir             string
+	enableWebRTC       bool
+	enableVoiceAgent   bool
+	sessionID          string
+	systemPrompt       string
+	asrBackend         string
+	asrEndpoint        string
+	llmBackend         string
+	llmEndpoint        string
+	llmModel           string
+	llmMaxTokens       int
+	ttsBackend         string
+	ttsEndpoint        string
+	mockASRText        string
+	autoCommit         bool
+	autoCommitIdle     time.Duration
+	autoCommitMinBytes int
+	autoCommitPoll     time.Duration
+	ttsFrameBytes      int
+	ttsFrameDelay      time.Duration
 }
 
 func loadConfig() config {
 	cfg := config{
-		httpAddr:         envOrDefault("WEBRTC_HTTP_ADDR", ":8080"),
-		udpAddr:          envOrDefault("WEBRTC_UDP_ADDR", ":5000"),
-		webDir:           envOrDefault("WEBRTC_WEB_DIR", "../web"),
-		enableWebRTC:     envBoolOrDefault("WEBRTC_ENABLE", true),
-		enableVoiceAgent: envBoolOrDefault("VOICE_AGENT_ENABLE", true),
-		sessionID:        envOrDefault("VOICE_AGENT_SESSION_ID", "esp32-default"),
-		systemPrompt:     envOrDefault("VOICE_AGENT_SYSTEM_PROMPT", "You are a concise voice assistant. Reply with short, speakable sentences."),
-		asrBackend:       envOrDefault("VOICE_AGENT_ASR_BACKEND", "mock"),
-		asrEndpoint:      envOrDefault("VOICE_AGENT_ASR_ENDPOINT", "http://127.0.0.1:8091/transcribe"),
-		llmBackend:       envOrDefault("VOICE_AGENT_LLM_BACKEND", "mock"),
-		llmEndpoint:      envOrDefault("VOICE_AGENT_LLM_ENDPOINT", "http://127.0.0.1:8092/respond"),
-		llmModel:         envOrDefault("VOICE_AGENT_LLM_MODEL", "local-model"),
-		llmMaxTokens:     envIntOrDefault("VOICE_AGENT_LLM_MAX_TOKENS", 512),
-		ttsBackend:       envOrDefault("VOICE_AGENT_TTS_BACKEND", "mock"),
-		ttsEndpoint:      envOrDefault("VOICE_AGENT_TTS_ENDPOINT", "http://127.0.0.1:8093/synthesize"),
-		mockASRText:      envOrDefault("VOICE_AGENT_MOCK_ASR_TEXT", ""),
-		ttsFrameBytes:    envIntOrDefault("VOICE_AGENT_TTS_FRAME_BYTES", 160),
-		ttsFrameDelay:    envDurationOrDefault("VOICE_AGENT_TTS_FRAME_DELAY", 20*time.Millisecond),
+		httpAddr:           envOrDefault("WEBRTC_HTTP_ADDR", ":8080"),
+		udpAddr:            envOrDefault("WEBRTC_UDP_ADDR", ":5000"),
+		webDir:             envOrDefault("WEBRTC_WEB_DIR", "../web"),
+		enableWebRTC:       envBoolOrDefault("WEBRTC_ENABLE", true),
+		enableVoiceAgent:   envBoolOrDefault("VOICE_AGENT_ENABLE", true),
+		sessionID:          envOrDefault("VOICE_AGENT_SESSION_ID", "esp32-default"),
+		systemPrompt:       envOrDefault("VOICE_AGENT_SYSTEM_PROMPT", "You are a concise voice assistant. Reply with short, speakable sentences."),
+		asrBackend:         envOrDefault("VOICE_AGENT_ASR_BACKEND", "mock"),
+		asrEndpoint:        envOrDefault("VOICE_AGENT_ASR_ENDPOINT", "http://127.0.0.1:8091/transcribe"),
+		llmBackend:         envOrDefault("VOICE_AGENT_LLM_BACKEND", "mock"),
+		llmEndpoint:        envOrDefault("VOICE_AGENT_LLM_ENDPOINT", "http://127.0.0.1:8092/respond"),
+		llmModel:           envOrDefault("VOICE_AGENT_LLM_MODEL", "local-model"),
+		llmMaxTokens:       envIntOrDefault("VOICE_AGENT_LLM_MAX_TOKENS", 512),
+		ttsBackend:         envOrDefault("VOICE_AGENT_TTS_BACKEND", "mock"),
+		ttsEndpoint:        envOrDefault("VOICE_AGENT_TTS_ENDPOINT", "http://127.0.0.1:8093/synthesize"),
+		mockASRText:        envOrDefault("VOICE_AGENT_MOCK_ASR_TEXT", ""),
+		autoCommit:         envBoolOrDefault("VOICE_AGENT_AUTO_COMMIT", false),
+		autoCommitIdle:     envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_IDLE", 1500*time.Millisecond),
+		autoCommitMinBytes: envIntOrDefault("VOICE_AGENT_AUTO_COMMIT_MIN_BYTES", 4000),
+		autoCommitPoll:     envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_POLL", 200*time.Millisecond),
+		ttsFrameBytes:      envIntOrDefault("VOICE_AGENT_TTS_FRAME_BYTES", 160),
+		ttsFrameDelay:      envDurationOrDefault("VOICE_AGENT_TTS_FRAME_DELAY", 20*time.Millisecond),
 	}
 
 	flag.StringVar(&cfg.httpAddr, "http", cfg.httpAddr, "HTTP listen address")
@@ -66,6 +74,10 @@ func loadConfig() config {
 	flag.StringVar(&cfg.ttsBackend, "tts-backend", cfg.ttsBackend, "TTS backend: mock or http")
 	flag.StringVar(&cfg.ttsEndpoint, "tts-endpoint", cfg.ttsEndpoint, "TTS HTTP endpoint")
 	flag.StringVar(&cfg.mockASRText, "mock-asr-text", cfg.mockASRText, "Static text returned by the mock ASR backend")
+	flag.BoolVar(&cfg.autoCommit, "auto-commit", cfg.autoCommit, "Automatically commit buffered ESP32 audio after idle")
+	flag.DurationVar(&cfg.autoCommitIdle, "auto-commit-idle", cfg.autoCommitIdle, "Idle duration before auto-committing buffered audio")
+	flag.IntVar(&cfg.autoCommitMinBytes, "auto-commit-min-bytes", cfg.autoCommitMinBytes, "Minimum buffered audio bytes required for auto-commit")
+	flag.DurationVar(&cfg.autoCommitPoll, "auto-commit-poll", cfg.autoCommitPoll, "Polling interval for auto-commit checks")
 	flag.IntVar(&cfg.ttsFrameBytes, "tts-frame-bytes", cfg.ttsFrameBytes, "Chunk size used when streaming synthesized audio back to ESP32")
 	flag.DurationVar(&cfg.ttsFrameDelay, "tts-frame-delay", cfg.ttsFrameDelay, "Delay between synthesized audio chunks sent to ESP32")
 	flag.Parse()

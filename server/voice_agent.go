@@ -107,6 +107,9 @@ type voiceStatus struct {
 	HistoryMessages    int               `json:"history_messages"`
 	ESP32Endpoint      string            `json:"esp32_endpoint,omitempty"`
 	Backends           map[string]string `json:"backends"`
+	AutoCommit         bool              `json:"auto_commit"`
+	AutoCommitIdleMs   int               `json:"auto_commit_idle_ms,omitempty"`
+	AutoCommitMinBytes int               `json:"auto_commit_min_bytes,omitempty"`
 	LastTurn           *voiceTurnResult  `json:"last_turn,omitempty"`
 }
 
@@ -129,12 +132,13 @@ type voiceAgentService struct {
 	tts       TTSClient
 	playAudio func([]byte) error
 
-	mu       sync.Mutex
-	buffer   []byte
-	history  []chatMessage
-	lastTurn *voiceTurnResult
-	turnID   int
-	busy     bool
+	mu          sync.Mutex
+	buffer      []byte
+	history     []chatMessage
+	lastTurn    *voiceTurnResult
+	turnID      int
+	busy        bool
+	lastAudioAt time.Time
 }
 
 func newVoiceAgentService(cfg config, asr ASRClient, agent AgentClient, tts TTSClient, playAudio func([]byte) error) *voiceAgentService {
@@ -151,6 +155,7 @@ func (v *voiceAgentService) IngestAudio(payload []byte) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.buffer = append(v.buffer, payload...)
+	v.lastAudioAt = time.Now()
 }
 
 func (v *voiceAgentService) Status(esp32Endpoint string) voiceStatus {
@@ -168,6 +173,9 @@ func (v *voiceAgentService) Status(esp32Endpoint string) voiceStatus {
 			"llm": v.cfg.llmBackend,
 			"tts": v.cfg.ttsBackend,
 		},
+		AutoCommit:         v.cfg.autoCommit,
+		AutoCommitIdleMs:   int(v.cfg.autoCommitIdle / time.Millisecond),
+		AutoCommitMinBytes: v.cfg.autoCommitMinBytes,
 	}
 	if v.lastTurn != nil {
 		turnCopy := *v.lastTurn
@@ -183,6 +191,17 @@ func (v *voiceAgentService) Reset() {
 	v.history = nil
 	v.lastTurn = nil
 	v.busy = false
+	v.lastAudioAt = time.Time{}
+}
+
+func (v *voiceAgentService) ShouldAutoCommit(now time.Time) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.busy || len(v.buffer) < v.cfg.autoCommitMinBytes || v.lastAudioAt.IsZero() {
+		return false
+	}
+	return now.Sub(v.lastAudioAt) >= v.cfg.autoCommitIdle
 }
 
 func (v *voiceAgentService) CommitBufferedAudio(ctx context.Context, speak bool) (voiceTurnResult, error) {

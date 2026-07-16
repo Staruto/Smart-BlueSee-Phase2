@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"time"
 )
 
 type serverApp struct {
@@ -64,10 +66,52 @@ func (a *serverApp) start() error {
 			a.cfg.ttsBackend,
 			a.cfg.sessionID,
 		)
+		if a.cfg.autoCommit {
+			log.Printf(
+				"Voice auto-commit enabled (idle=%s min_bytes=%d poll=%s)",
+				a.cfg.autoCommitIdle,
+				a.cfg.autoCommitMinBytes,
+				a.cfg.autoCommitPoll,
+			)
+			go a.runVoiceAutoCommitLoop()
+		}
 	}
 
 	go a.udp.Serve()
 	return nil
+}
+
+func (a *serverApp) runVoiceAutoCommitLoop() {
+	poll := a.cfg.autoCommitPoll
+	if poll <= 0 {
+		poll = 200 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if a.voice == nil || !a.voice.ShouldAutoCommit(time.Now()) {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		turn, err := a.voice.CommitBufferedAudio(ctx, true)
+		cancel()
+		if err != nil {
+			log.Printf("Voice auto-commit failed: %v", err)
+			continue
+		}
+
+		log.Printf(
+			"Voice auto-commit completed: turn=%d input_bytes=%d output_bytes=%d input=%q reply=%q",
+			turn.TurnID,
+			turn.InputAudioBytes,
+			turn.OutputAudioBytes,
+			turn.InputText,
+			turn.ReplyText,
+		)
+	}
 }
 
 func (a *serverApp) handleInboundAudio(payload []byte) {

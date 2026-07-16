@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeASRClient struct {
@@ -58,11 +59,13 @@ func (f fakeTTSClient) Synthesize(_ context.Context, req ttsRequest) (ttsResult,
 
 func newTestVoiceAgent(asr ASRClient, agent AgentClient, tts TTSClient, playAudio func([]byte) error) *voiceAgentService {
 	cfg := config{
-		sessionID:    "test-session",
-		systemPrompt: "test prompt",
-		asrBackend:   "test-asr",
-		llmBackend:   "test-llm",
-		ttsBackend:   "test-tts",
+		sessionID:          "test-session",
+		systemPrompt:       "test prompt",
+		asrBackend:         "test-asr",
+		llmBackend:         "test-llm",
+		ttsBackend:         "test-tts",
+		autoCommitIdle:     1500 * time.Millisecond,
+		autoCommitMinBytes: 4,
 	}
 	return newVoiceAgentService(cfg, asr, agent, tts, playAudio)
 }
@@ -145,5 +148,40 @@ func TestCommitBufferedAudioRequiresBuffer(t *testing.T) {
 	_, err := voice.CommitBufferedAudio(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "no buffered audio available") {
 		t.Fatalf("CommitBufferedAudio error = %v, want no buffered audio available", err)
+	}
+}
+
+func TestShouldAutoCommitHonorsIdleAndMinBytes(t *testing.T) {
+	voice := newTestVoiceAgent(&fakeASRClient{text: "unused"}, fakeAgentClient{}, fakeTTSClient{}, nil)
+	now := time.Now()
+
+	if voice.ShouldAutoCommit(now) {
+		t.Fatalf("ShouldAutoCommit = true without audio")
+	}
+
+	voice.IngestAudio([]byte{1, 2, 3})
+	if voice.ShouldAutoCommit(now.Add(2 * time.Second)) {
+		t.Fatalf("ShouldAutoCommit = true below min bytes")
+	}
+
+	voice.IngestAudio([]byte{4})
+	if voice.ShouldAutoCommit(time.Now().Add(500 * time.Millisecond)) {
+		t.Fatalf("ShouldAutoCommit = true before idle duration")
+	}
+	if !voice.ShouldAutoCommit(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("ShouldAutoCommit = false after idle duration and min bytes")
+	}
+}
+
+func TestShouldAutoCommitSkipsBusyTurn(t *testing.T) {
+	voice := newTestVoiceAgent(&fakeASRClient{text: "unused"}, fakeAgentClient{}, fakeTTSClient{}, nil)
+	voice.IngestAudio([]byte{1, 2, 3, 4})
+
+	if err := voice.beginTextTurn(); err != nil {
+		t.Fatalf("beginTextTurn returned error: %v", err)
+	}
+
+	if voice.ShouldAutoCommit(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("ShouldAutoCommit = true while busy")
 	}
 }
