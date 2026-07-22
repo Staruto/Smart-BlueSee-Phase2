@@ -249,6 +249,66 @@ func TestCommitBufferedAudioAutoReportsTriggerAndPlaybackTiming(t *testing.T) {
 	}
 }
 
+func TestLoopbackBufferedAudioSendsRawBuffer(t *testing.T) {
+	var played []byte
+	voice := newTestVoiceAgent(
+		&fakeASRClient{text: "should not be called"},
+		fakeAgentClient{},
+		fakeTTSClient{},
+		func(audio []byte) error {
+			time.Sleep(time.Millisecond)
+			played = append([]byte(nil), audio...)
+			return nil
+		},
+	)
+	voice.IngestAudio([]byte{1, 2, 3, 4, 5, 6})
+
+	turn, err := voice.LoopbackBufferedAudio(context.Background(), "loopback")
+	if err != nil {
+		t.Fatalf("LoopbackBufferedAudio returned error: %v", err)
+	}
+
+	if turn.Source != "loopback" {
+		t.Fatalf("Source = %q, want loopback", turn.Source)
+	}
+	if turn.InputAudioBytes != 6 || turn.OutputAudioBytes != 6 {
+		t.Fatalf("loopback byte counts = input %d output %d, want 6/6", turn.InputAudioBytes, turn.OutputAudioBytes)
+	}
+	if string(played) != string([]byte{1, 2, 3, 4, 5, 6}) {
+		t.Fatalf("played bytes = %v", played)
+	}
+	if turn.Timing == nil || turn.Timing.Trigger != "loopback" || turn.Timing.PlaybackSendMs == 0 {
+		t.Fatalf("loopback timing not populated correctly: %#v", turn.Timing)
+	}
+
+	status := voice.Status("")
+	if status.BufferedAudioBytes != 0 {
+		t.Fatalf("BufferedAudioBytes = %d, want 0", status.BufferedAudioBytes)
+	}
+}
+
+func TestLoopbackBufferedAudioRestoresBufferOnPlaybackFailure(t *testing.T) {
+	voice := newTestVoiceAgent(
+		&fakeASRClient{text: "should not be called"},
+		fakeAgentClient{},
+		fakeTTSClient{},
+		func(_ []byte) error {
+			return errors.New("speaker unavailable")
+		},
+	)
+	voice.IngestAudio([]byte{1, 2, 3, 4})
+
+	_, err := voice.LoopbackBufferedAudio(context.Background(), "loopback")
+	if err == nil || !strings.Contains(err.Error(), "speaker unavailable") {
+		t.Fatalf("LoopbackBufferedAudio error = %v, want speaker unavailable", err)
+	}
+
+	status := voice.Status("")
+	if status.BufferedAudioBytes != 4 {
+		t.Fatalf("BufferedAudioBytes = %d, want 4", status.BufferedAudioBytes)
+	}
+}
+
 func TestShouldAutoCommitDropsLowEnergyBufferedAudio(t *testing.T) {
 	cfg := config{
 		sessionID:          "test-session",

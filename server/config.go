@@ -25,6 +25,7 @@ type config struct {
 	ttsEndpoint        string
 	mockASRText        string
 	autoCommit         bool
+	autoCommitMode     string
 	autoCommitIdle     time.Duration
 	autoCommitMinBytes int
 	autoCommitMinAudio time.Duration
@@ -53,6 +54,7 @@ func loadConfig() config {
 		ttsEndpoint:        envOrDefault("VOICE_AGENT_TTS_ENDPOINT", "http://127.0.0.1:8093/synthesize"),
 		mockASRText:        envOrDefault("VOICE_AGENT_MOCK_ASR_TEXT", ""),
 		autoCommit:         envBoolOrDefault("VOICE_AGENT_AUTO_COMMIT", false),
+		autoCommitMode:     envOrDefault("VOICE_AGENT_AUTO_COMMIT_MODE", "agent"),
 		autoCommitIdle:     envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_IDLE", 1500*time.Millisecond),
 		autoCommitMinBytes: envIntOrDefault("VOICE_AGENT_AUTO_COMMIT_MIN_BYTES", 4000),
 		autoCommitMinAudio: envDurationOrDefault("VOICE_AGENT_AUTO_COMMIT_MIN_AUDIO", 800*time.Millisecond),
@@ -79,6 +81,7 @@ func loadConfig() config {
 	flag.StringVar(&cfg.ttsEndpoint, "tts-endpoint", cfg.ttsEndpoint, "TTS HTTP endpoint")
 	flag.StringVar(&cfg.mockASRText, "mock-asr-text", cfg.mockASRText, "Static text returned by the mock ASR backend")
 	flag.BoolVar(&cfg.autoCommit, "auto-commit", cfg.autoCommit, "Automatically commit buffered ESP32 audio after idle")
+	flag.StringVar(&cfg.autoCommitMode, "auto-commit-mode", cfg.autoCommitMode, "Auto-commit mode: agent or loopback")
 	flag.DurationVar(&cfg.autoCommitIdle, "auto-commit-idle", cfg.autoCommitIdle, "Idle duration before auto-committing buffered audio")
 	flag.IntVar(&cfg.autoCommitMinBytes, "auto-commit-min-bytes", cfg.autoCommitMinBytes, "Minimum buffered audio bytes required for auto-commit")
 	flag.DurationVar(&cfg.autoCommitMinAudio, "auto-commit-min-audio", cfg.autoCommitMinAudio, "Minimum buffered audio duration required for auto-commit")

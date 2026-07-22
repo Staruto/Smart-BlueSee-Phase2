@@ -33,6 +33,7 @@ Default behavior:
 - `GET /healthz`
 - `GET /api/voice/status`
 - `POST /api/voice/commit`
+- `POST /api/voice/loopback`
 - `POST /api/voice/audio-turn`
 - `POST /api/voice/text-turn`
 - `POST /api/voice/reset`
@@ -59,6 +60,16 @@ Invoke-RestMethod `
 
 The buffered commit endpoint uses whatever PCMU audio the ESP32 has already sent to the server over UDP.
 
+Example buffered raw loopback:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8080/api/voice/loopback
+```
+
+The loopback endpoint skips ASR, LLM, and TTS. It sends the exact buffered ESP32 PCMU audio back to the current ESP32 UDP endpoint so you can check whether capture and transport contain the full utterance before ASR runs.
+
 Example software-only audio turn:
 
 ```powershell
@@ -71,6 +82,16 @@ Invoke-RestMethod `
 
 The audio turn endpoint accepts base64 PCMU (`g711_ulaw`, 8 kHz, mono) and runs `ASR -> LLM -> TTS` without requiring ESP32 UDP audio. Use `speak:false` while ESP32 is offline.
 
+Turn responses include a `timing` object for latency debugging. Key fields are:
+
+- `total_ms`
+- `asr_total_ms`, `asr_backend_ms`
+- `llm_total_ms`
+- `tts_total_ms`, `tts_backend_ms`
+- `playback_send_ms`
+- `buffer_age_ms`
+- `trigger`
+
 ## Backend modes
 
 Environment variables:
@@ -82,8 +103,17 @@ Environment variables:
 - `VOICE_AGENT_LLM_ENDPOINT=http://127.0.0.1:8092/respond`
 - `VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8093/synthesize`
 - `VOICE_AGENT_LLM_MODEL=local-model`
+- `VOICE_AGENT_AUTO_COMMIT=false`
+- `VOICE_AGENT_AUTO_COMMIT_MODE=agent`
+- `VOICE_AGENT_AUTO_COMMIT_IDLE=1500ms`
+- `VOICE_AGENT_AUTO_COMMIT_MIN_BYTES=4000`
+- `VOICE_AGENT_AUTO_COMMIT_MIN_AUDIO=800ms`
+- `VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB=-45`
+- `VOICE_AGENT_AUTO_COMMIT_POLL=200ms`
 
 `mock` mode validates server orchestration without requiring external modules. The mock TTS sends a generated PCMU tone, not spoken speech.
+
+Auto-commit can be enabled after ESP32 VAD-gated audio upload is stable. When enabled in `agent` mode, the server commits buffered ESP32 audio after no new audio arrives for the configured idle duration, then sends TTS playback to the ESP32. In `loopback` mode, the server sends the raw buffered audio back to ESP32 instead of calling ASR, LLM, or TTS. The server also applies a secondary guard before committing: the buffer must satisfy the minimum byte count, minimum audio duration, and minimum RMS level. Set `VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB=-100` or lower to disable the RMS guard during debugging.
 
 ## Local ASR/TTS adapter
 

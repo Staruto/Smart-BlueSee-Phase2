@@ -197,6 +197,7 @@ Environment=VOICE_AGENT_TTS_BACKEND=http
 Environment=VOICE_AGENT_ASR_ENDPOINT=http://127.0.0.1:8091/transcribe
 Environment=VOICE_AGENT_LLM_ENDPOINT=http://127.0.0.1:8092/respond
 Environment=VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8093/synthesize
+Environment=VOICE_AGENT_AUTO_COMMIT=false
 ```
 
 After changing the service:
@@ -208,6 +209,36 @@ sudo systemctl status webrtc-client
 ```
 
 If your ASR / LLM / TTS modules run on your local PC instead of the Ubuntu host, replace `127.0.0.1` with an address the Ubuntu host can actually reach.
+
+After manual ESP32 commit and playback are stable, enable automatic turn commits:
+
+```ini
+[Service]
+Environment=VOICE_AGENT_AUTO_COMMIT=true
+Environment=VOICE_AGENT_AUTO_COMMIT_MODE=agent
+Environment=VOICE_AGENT_AUTO_COMMIT_IDLE=2500ms
+Environment=VOICE_AGENT_AUTO_COMMIT_MIN_BYTES=8000
+Environment=VOICE_AGENT_AUTO_COMMIT_MIN_AUDIO=800ms
+Environment=VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB=-45
+Environment=VOICE_AGENT_AUTO_COMMIT_POLL=200ms
+```
+
+With auto-commit enabled, the cloud server commits buffered ESP32 audio after no new audio arrives for the idle duration and sends the TTS response back to the ESP32. The extra minimum audio and RMS guards prevent continuous quiet/no-speech packets from repeatedly reaching ASR. If ASR truncates utterances, increase `VOICE_AGENT_AUTO_COMMIT_IDLE` first, for example to `3000ms`. If very quiet speech is ignored, lower `VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB`, for example to `-50`.
+
+For raw capture diagnosis, temporarily set:
+
+```ini
+[Service]
+Environment=VOICE_AGENT_AUTO_COMMIT=true
+Environment=VOICE_AGENT_AUTO_COMMIT_MODE=loopback
+Environment=VOICE_AGENT_AUTO_COMMIT_IDLE=2500ms
+Environment=VOICE_AGENT_AUTO_COMMIT_MIN_BYTES=8000
+Environment=VOICE_AGENT_AUTO_COMMIT_MIN_AUDIO=800ms
+Environment=VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB=-45
+Environment=VOICE_AGENT_AUTO_COMMIT_POLL=200ms
+```
+
+In loopback mode, the server replays the buffered ESP32 microphone audio directly back to the ESP32 speaker and does not call ASR, LLM, or TTS.
 
 ### 2.7 Install and enable Nginx
 
@@ -297,6 +328,7 @@ Expected results:
 - JSON reply includes `input_text`, `reply_text`, `turn_id`
 - `reply_text` is non-empty
 - `output_audio_bytes` is greater than `0` when real or mock TTS is enabled
+- `timing` includes `llm_total_ms`, `tts_total_ms`, and `tts_backend_ms`
 
 Then confirm status updated:
 
@@ -340,6 +372,7 @@ Expected results:
 - `input_text` is produced by real ASR
 - `reply_text` is produced by real LLM
 - `output_audio_bytes` is greater than `0`
+- `timing` includes ASR, LLM, and TTS stage durations
 
 For cloud validation with ASR / LLM / TTS still on your PC, replace the module endpoints in the Go service environment with PC-reachable tunnel or VPN URLs. Keep `speak:false` while ESP32 is offline.
 
@@ -398,6 +431,37 @@ Expected results:
 - response contains `input_text` from ASR and `reply_text` from LLM
 - `output_audio_bytes` is greater than `0`
 - ESP32 speaker plays the response
+- `timing.playback_send_ms` is populated when `speak:true`
+
+To test raw capture before ASR, speak into ESP32, wait for `buffered_audio_bytes` to become greater than `0`, then run:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/voice/loopback
+```
+
+Expected results:
+
+- HTTP `200`
+- response has `"source":"loopback"`
+- `input_audio_bytes` equals `output_audio_bytes`
+- ESP32 plays back the raw microphone capture
+- if the first half is missing here, the truncation is before ASR; if loopback is complete but ASR is truncated, focus on ASR input conversion/model behavior
+
+If auto-commit is enabled, speak into the ESP32 and stop. After roughly `VOICE_AGENT_AUTO_COMMIT_IDLE`, the server should process the turn automatically. Confirm with:
+
+```bash
+curl http://127.0.0.1:8080/api/voice/status
+sudo journalctl -u webrtc-client -n 80 --no-pager
+```
+
+Expected results:
+
+- `last_turn` is populated
+- server logs contain `Voice auto-commit completed`
+- ESP32 plays the TTS response when the turn succeeds
+- `last_turn.timing.trigger` is `auto_commit`
+- auto-commit logs include total, ASR, LLM, TTS, and playback milliseconds
+- idle silence should not produce repeated `ASR returned empty text` logs
 
 If you use mock backends:
 

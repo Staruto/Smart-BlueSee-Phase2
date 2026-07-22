@@ -127,6 +127,7 @@ type voiceStatus struct {
 	ESP32Endpoint      string            `json:"esp32_endpoint,omitempty"`
 	Backends           map[string]string `json:"backends"`
 	AutoCommit         bool              `json:"auto_commit"`
+	AutoCommitMode     string            `json:"auto_commit_mode,omitempty"`
 	AutoCommitIdleMs   int               `json:"auto_commit_idle_ms,omitempty"`
 	AutoCommitMinBytes int               `json:"auto_commit_min_bytes,omitempty"`
 	AutoCommitMinAudio int               `json:"auto_commit_min_audio_ms,omitempty"`
@@ -195,6 +196,7 @@ func (v *voiceAgentService) Status(esp32Endpoint string) voiceStatus {
 			"tts": v.cfg.ttsBackend,
 		},
 		AutoCommit:         v.cfg.autoCommit,
+		AutoCommitMode:     v.cfg.autoCommitMode,
 		AutoCommitIdleMs:   int(v.cfg.autoCommitIdle / time.Millisecond),
 		AutoCommitMinBytes: v.cfg.autoCommitMinBytes,
 		AutoCommitMinAudio: int(v.cfg.autoCommitMinAudio / time.Millisecond),
@@ -247,6 +249,48 @@ func (v *voiceAgentService) CommitBufferedAudio(ctx context.Context, speak bool)
 
 func (v *voiceAgentService) CommitBufferedAudioAuto(ctx context.Context, speak bool) (voiceTurnResult, error) {
 	return v.commitBufferedAudio(ctx, speak, "auto_commit")
+}
+
+func (v *voiceAgentService) LoopbackBufferedAudio(ctx context.Context, trigger string) (voiceTurnResult, error) {
+	if trigger == "" {
+		trigger = "loopback"
+	}
+
+	started := time.Now()
+	snapshot, bufferAge, err := v.beginBufferedTurn()
+	if err != nil {
+		return voiceTurnResult{}, err
+	}
+
+	timing := &voiceTurnTiming{
+		Trigger:          trigger,
+		BufferAgeMs:      durationMillis(bufferAge),
+		AutoCommitIdleMs: autoCommitIdleMs(trigger, v.cfg.autoCommitIdle),
+		InputAudioMs:     durationMillis(pcmuDuration(snapshot)),
+	}
+
+	if v.playAudio == nil {
+		v.restoreBufferedAudio(snapshot)
+		return voiceTurnResult{}, fmt.Errorf("audio playback is not configured")
+	}
+
+	playbackStarted := time.Now()
+	if err := v.playAudio(snapshot); err != nil {
+		v.restoreBufferedAudio(snapshot)
+		return voiceTurnResult{}, err
+	}
+	timing.PlaybackSendMs = elapsedMillis(playbackStarted)
+	timing.TotalMs = elapsedMillis(started)
+
+	turn := voiceTurnResult{
+		Source:           "loopback",
+		InputAudioBytes:  len(snapshot),
+		OutputAudioBytes: len(snapshot),
+		Timing:           timing,
+	}
+
+	v.finishTurn(&turn)
+	return turn, nil
 }
 
 func (v *voiceAgentService) commitBufferedAudio(ctx context.Context, speak bool, trigger string) (voiceTurnResult, error) {
@@ -847,7 +891,7 @@ func metaLatencyMillis(meta map[string]any) int {
 }
 
 func autoCommitIdleMs(trigger string, idle time.Duration) int {
-	if trigger != "auto_commit" {
+	if trigger != "auto_commit" && trigger != "auto_loopback" {
 		return 0
 	}
 	return durationMillis(idle)

@@ -68,6 +68,24 @@ func (a *serverApp) handleVoiceCommit(rw http.ResponseWriter, req *http.Request)
 	writeJSON(rw, http.StatusOK, turn)
 }
 
+func (a *serverApp) handleVoiceLoopback(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeMethodNotAllowed(rw, http.MethodPost)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(req.Context(), 90*time.Second)
+	defer cancel()
+
+	turn, err := a.voice.LoopbackBufferedAudio(ctx, "loopback")
+	if err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, turn)
+}
+
 func (a *serverApp) handleVoiceAudioTurn(rw http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeMethodNotAllowed(rw, http.MethodPost)

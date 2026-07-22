@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -68,7 +70,8 @@ func (a *serverApp) start() error {
 		)
 		if a.cfg.autoCommit {
 			log.Printf(
-				"Voice auto-commit enabled (idle=%s min_bytes=%d min_audio=%s min_rms_db=%.1f poll=%s)",
+				"Voice auto-commit enabled (mode=%s idle=%s min_bytes=%d min_audio=%s min_rms_db=%.1f poll=%s)",
+				a.cfg.autoCommitMode,
 				a.cfg.autoCommitIdle,
 				a.cfg.autoCommitMinBytes,
 				a.cfg.autoCommitMinAudio,
@@ -98,7 +101,7 @@ func (a *serverApp) runVoiceAutoCommitLoop() {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		turn, err := a.voice.CommitBufferedAudioAuto(ctx, true)
+		turn, err := a.runVoiceAutoCommitTurn(ctx)
 		cancel()
 		if err != nil {
 			log.Printf("Voice auto-commit failed: %v", err)
@@ -110,7 +113,8 @@ func (a *serverApp) runVoiceAutoCommitLoop() {
 			timing = &voiceTurnTiming{}
 		}
 		log.Printf(
-			"Voice auto-commit completed: turn=%d input_bytes=%d output_bytes=%d total_ms=%d asr_ms=%d llm_ms=%d tts_ms=%d playback_ms=%d input=%q reply=%q",
+			"Voice auto-commit completed: mode=%s turn=%d input_bytes=%d output_bytes=%d total_ms=%d asr_ms=%d llm_ms=%d tts_ms=%d playback_ms=%d input=%q reply=%q",
+			a.cfg.autoCommitMode,
 			turn.TurnID,
 			turn.InputAudioBytes,
 			turn.OutputAudioBytes,
@@ -122,6 +126,17 @@ func (a *serverApp) runVoiceAutoCommitLoop() {
 			turn.InputText,
 			turn.ReplyText,
 		)
+	}
+}
+
+func (a *serverApp) runVoiceAutoCommitTurn(ctx context.Context) (voiceTurnResult, error) {
+	switch strings.ToLower(strings.TrimSpace(a.cfg.autoCommitMode)) {
+	case "", "agent":
+		return a.voice.CommitBufferedAudioAuto(ctx, true)
+	case "loopback", "raw-loopback", "raw":
+		return a.voice.LoopbackBufferedAudio(ctx, "auto_loopback")
+	default:
+		return voiceTurnResult{}, fmt.Errorf("unsupported VOICE_AGENT_AUTO_COMMIT_MODE %q", a.cfg.autoCommitMode)
 	}
 }
 
@@ -144,6 +159,7 @@ func (a *serverApp) registerRoutes(mux *http.ServeMux) {
 	if a.voice != nil {
 		mux.HandleFunc("/api/voice/status", a.handleVoiceStatus)
 		mux.HandleFunc("/api/voice/commit", a.handleVoiceCommit)
+		mux.HandleFunc("/api/voice/loopback", a.handleVoiceLoopback)
 		mux.HandleFunc("/api/voice/audio-turn", a.handleVoiceAudioTurn)
 		mux.HandleFunc("/api/voice/text-turn", a.handleVoiceTextTurn)
 		mux.HandleFunc("/api/voice/reset", a.handleVoiceReset)

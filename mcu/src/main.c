@@ -19,6 +19,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <netdb.h>        
+#include <lwip/sockets.h> 
+#include <lwip/netdb.h> 
 
 static const char *TAG = "udp_pcmu_espidf";
 static esp_afe_sr_data_t *afe_data = NULL;
@@ -321,19 +324,10 @@ static int send_pcm_as_ulaw(int sock,
         return -1;
     }
 
-    int input_samples = samples;
-
-    if (input_samples > PCM_TX_FRAME_SAMPLES) {
-        input_samples = PCM_TX_FRAME_SAMPLES;
-    }
-
+    int total_sent = 0;
     int output_count = 0;
 
-    for (int i = 0;
-         i + step - 1 < input_samples &&
-         output_count < ULAW_TX_FRAME_BYTES;
-         i += step)
-    {
+    for (int i = 0; i + step - 1 < samples; i += step) {
         int32_t mixed = 0;
 
         for (int j = 0; j < step; j++) {
@@ -343,26 +337,44 @@ static int send_pcm_as_ulaw(int sock,
         mixed /= step;
 
         ulaw_buf[output_count++] = encode_ulaw((int16_t)mixed);
+
+        if (output_count >= ULAW_TX_FRAME_BYTES) {
+            ssize_t sent =
+                sendto(sock,
+                       ulaw_buf,
+                       output_count,
+                       0,
+                       (const struct sockaddr *)server_addr,
+                       sizeof(*server_addr));
+
+            if (sent < 0) {
+                ESP_LOGE(TAG, "UDP send audio failed, errno=%d", errno);
+                return -1;
+            }
+
+            total_sent += (int)sent;
+            output_count = 0;
+        }
     }
 
-    if (output_count <= 0) {
-        return 0;
+    if (output_count > 0) {
+        ssize_t sent =
+            sendto(sock,
+                   ulaw_buf,
+                   output_count,
+                   0,
+                   (const struct sockaddr *)server_addr,
+                   sizeof(*server_addr));
+
+        if (sent < 0) {
+            ESP_LOGE(TAG, "UDP send audio failed, errno=%d", errno);
+            return -1;
+        }
+
+        total_sent += (int)sent;
     }
 
-    ssize_t sent =
-        sendto(sock,
-               ulaw_buf,
-               output_count,
-               0,
-               (const struct sockaddr *)server_addr,
-               sizeof(*server_addr));
-
-    if (sent < 0) {
-        ESP_LOGE(TAG, "UDP send audio failed, errno=%d", errno);
-        return -1;
-    }
-
-    return (int)sent;
+    return total_sent;
 }
 
 static int send_udp_heartbeat(int sock,
@@ -410,6 +422,20 @@ static void udp_task(void *arg) {
         ESP_LOGE(TAG, "UDP socket failed, errno=%d", errno);
         vTaskDelete(NULL);
         return;
+    }
+
+    int send_buf_size = 8192;
+    int ret = setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &send_buf_size, sizeof(send_buf_size));
+    if (ret < 0) {
+        ESP_LOGW(TAG, "Failed to set send buffer size, errno=%d", errno);
+    } else {
+        ESP_LOGI(TAG, "Send buffer set to %d bytes", send_buf_size);
+    }
+
+    int recv_buf_size = 4096;
+    ret = setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &recv_buf_size, sizeof(recv_buf_size));
+    if (ret < 0) {
+        ESP_LOGW(TAG, "Failed to set receive buffer size, errno=%d", errno);
     }
 
     local_addr.sin_family = AF_INET;
@@ -839,5 +865,5 @@ void app_main(void) {
     ESP_LOGI(TAG, "connected to WiFi, app started");
 
     // Start UDP task only after WiFi is connected
-    xTaskCreate(&udp_task, "udp_audio", 16384, NULL, 6, NULL);
+    xTaskCreate(&udp_task, "udp_audio", 20480, NULL, 6, NULL);
 }
