@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -366,6 +368,143 @@ func TestShouldAutoCommitSkipsBusyTurn(t *testing.T) {
 
 	if voice.ShouldAutoCommit(time.Now().Add(2 * time.Second)) {
 		t.Fatalf("ShouldAutoCommit = true while busy")
+	}
+}
+
+func TestOpenAICompatibleAgentClientSendsBearerAuth(t *testing.T) {
+	var gotAuth string
+	var gotModel string
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", req.Method)
+		}
+		gotAuth = req.Header.Get("Authorization")
+
+		var payload struct {
+			Model    string        `json:"model"`
+			Messages []chatMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		gotModel = payload.Model
+		if len(payload.Messages) != 2 {
+			t.Fatalf("messages len = %d, want 2", len(payload.Messages))
+		}
+		if payload.Messages[0].Role != "system" || payload.Messages[1].Role != "user" {
+			t.Fatalf("unexpected messages: %#v", payload.Messages)
+		}
+
+		writeJSON(rw, http.StatusOK, map[string]any{
+			"choices": []map[string]any{
+				{
+					"message":       map[string]string{"content": "cloud reply"},
+					"finish_reason": "stop",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := openAICompatibleAgentClient{
+		endpoint:  server.URL,
+		model:     "deepseek-v4-flash",
+		maxTokens: 128,
+		apiKey:    "test-secret",
+		client:    server.Client(),
+	}
+
+	result, err := client.Run(context.Background(), agentRequest{
+		SystemPrompt: "system prompt",
+		Messages:     []chatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if gotAuth != "Bearer test-secret" {
+		t.Fatalf("Authorization = %q, want bearer token", gotAuth)
+	}
+	if gotModel != "deepseek-v4-flash" {
+		t.Fatalf("model = %q", gotModel)
+	}
+	if result.Text != "cloud reply" || result.StopReason != "stop" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestOpenAICompatibleAgentClientOmitsEmptyBearerAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if gotAuth := req.Header.Get("Authorization"); gotAuth != "" {
+			t.Fatalf("Authorization = %q, want empty", gotAuth)
+		}
+		writeJSON(rw, http.StatusOK, map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"content": "reply"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := openAICompatibleAgentClient{
+		endpoint: server.URL,
+		model:    "local-model",
+		client:   server.Client(),
+	}
+
+	if _, err := client.Run(context.Background(), agentRequest{Messages: []chatMessage{{Role: "user", Content: "hello"}}}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+func TestOpenAICompatibleAgentClientRedactsAPIKeyFromHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		writeJSON(rw, http.StatusUnauthorized, map[string]any{"error": "bad key test-secret"})
+	}))
+	defer server.Close()
+
+	client := openAICompatibleAgentClient{
+		endpoint: server.URL,
+		model:    "deepseek-v4-flash",
+		apiKey:   "test-secret",
+		client:   server.Client(),
+	}
+
+	_, err := client.Run(context.Background(), agentRequest{Messages: []chatMessage{{Role: "user", Content: "hello"}}})
+	if err == nil {
+		t.Fatalf("Run returned nil error")
+	}
+	if strings.Contains(err.Error(), "test-secret") {
+		t.Fatalf("error leaked api key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("error = %v, want redaction marker", err)
+	}
+}
+
+func TestOpenAICompatibleAgentClientRejectsReasoningOnlyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		writeJSON(rw, http.StatusOK, map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]string{
+						"content":           "",
+						"reasoning_content": "thinking only",
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := openAICompatibleAgentClient{
+		endpoint: server.URL,
+		model:    "cloud-model",
+		client:   server.Client(),
+	}
+
+	_, err := client.Run(context.Background(), agentRequest{Messages: []chatMessage{{Role: "user", Content: "hello"}}})
+	if err == nil || !strings.Contains(err.Error(), "reasoning_content") {
+		t.Fatalf("Run error = %v, want reasoning_content error", err)
 	}
 }
 

@@ -103,6 +103,8 @@ Environment variables:
 - `VOICE_AGENT_LLM_ENDPOINT=http://127.0.0.1:8092/respond`
 - `VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8093/synthesize`
 - `VOICE_AGENT_LLM_MODEL=local-model`
+- `VOICE_AGENT_LLM_API_KEY=...`
+- `VOICE_AGENT_LLM_MAX_TOKENS=512`
 - `VOICE_AGENT_AUTO_COMMIT=false`
 - `VOICE_AGENT_AUTO_COMMIT_MODE=agent`
 - `VOICE_AGENT_AUTO_COMMIT_IDLE=1500ms`
@@ -112,6 +114,17 @@ Environment variables:
 - `VOICE_AGENT_AUTO_COMMIT_POLL=200ms`
 
 `mock` mode validates server orchestration without requiring external modules. The mock TTS sends a generated PCMU tone, not spoken speech.
+
+Cloud OpenAI-compatible LLM example using DeepSeek:
+
+```powershell
+$env:VOICE_AGENT_LLM_BACKEND="openai"
+$env:VOICE_AGENT_LLM_ENDPOINT="https://api.deepseek.com/chat/completions"
+$env:VOICE_AGENT_LLM_MODEL="deepseek-v4-flash"
+$env:VOICE_AGENT_LLM_API_KEY="..."
+```
+
+Kimi can be used the same way by setting `VOICE_AGENT_LLM_ENDPOINT=https://api.moonshot.ai/v1/chat/completions` and `VOICE_AGENT_LLM_MODEL` to the exact model ID from the Kimi console/API docs.
 
 Auto-commit can be enabled after ESP32 VAD-gated audio upload is stable. When enabled in `agent` mode, the server commits buffered ESP32 audio after no new audio arrives for the configured idle duration, then sends TTS playback to the ESP32. In `loopback` mode, the server sends the raw buffered audio back to ESP32 instead of calling ASR, LLM, or TTS. The server also applies a secondary guard before committing: the buffer must satisfy the minimum byte count, minimum audio duration, and minimum RMS level. Set `VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB=-100` or lower to disable the RMS guard during debugging.
 

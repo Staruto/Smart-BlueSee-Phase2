@@ -21,6 +21,7 @@ type config struct {
 	llmEndpoint        string
 	llmModel           string
 	llmMaxTokens       int
+	llmAPIKey          string
 	ttsBackend         string
 	ttsEndpoint        string
 	mockASRText        string
@@ -50,6 +51,7 @@ func loadConfig() config {
 		llmEndpoint:        envOrDefault("VOICE_AGENT_LLM_ENDPOINT", "http://127.0.0.1:8092/respond"),
 		llmModel:           envOrDefault("VOICE_AGENT_LLM_MODEL", "local-model"),
 		llmMaxTokens:       envIntOrDefault("VOICE_AGENT_LLM_MAX_TOKENS", 512),
+		llmAPIKey:          envOrDefault("VOICE_AGENT_LLM_API_KEY", ""),
 		ttsBackend:         envOrDefault("VOICE_AGENT_TTS_BACKEND", "mock"),
 		ttsEndpoint:        envOrDefault("VOICE_AGENT_TTS_ENDPOINT", "http://127.0.0.1:8093/synthesize"),
 		mockASRText:        envOrDefault("VOICE_AGENT_MOCK_ASR_TEXT", ""),
@@ -77,6 +79,7 @@ func loadConfig() config {
 	flag.StringVar(&cfg.llmEndpoint, "llm-endpoint", cfg.llmEndpoint, "LLM HTTP endpoint")
 	flag.StringVar(&cfg.llmModel, "llm-model", cfg.llmModel, "LLM model name used by OpenAI-compatible backends")
 	flag.IntVar(&cfg.llmMaxTokens, "llm-max-tokens", cfg.llmMaxTokens, "Max tokens for OpenAI-compatible LLM requests")
+	flag.StringVar(&cfg.llmAPIKey, "llm-api-key", cfg.llmAPIKey, "API key used by OpenAI-compatible LLM backends")
 	flag.StringVar(&cfg.ttsBackend, "tts-backend", cfg.ttsBackend, "TTS backend: mock or http")
 	flag.StringVar(&cfg.ttsEndpoint, "tts-endpoint", cfg.ttsEndpoint, "TTS HTTP endpoint")
 	flag.StringVar(&cfg.mockASRText, "mock-asr-text", cfg.mockASRText, "Static text returned by the mock ASR backend")

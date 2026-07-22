@@ -590,6 +590,7 @@ func newAgentClient(cfg config) (AgentClient, error) {
 			endpoint:  cfg.llmEndpoint,
 			model:     cfg.llmModel,
 			maxTokens: cfg.llmMaxTokens,
+			apiKey:    cfg.llmAPIKey,
 			client:    &http.Client{Timeout: 90 * time.Second},
 		}, nil
 	default:
@@ -715,6 +716,7 @@ type openAICompatibleAgentClient struct {
 	endpoint  string
 	model     string
 	maxTokens int
+	apiKey    string
 	client    *http.Client
 }
 
@@ -752,11 +754,16 @@ func (o openAICompatibleAgentClient) Run(ctx context.Context, req agentRequest) 
 			Type    string `json:"type,omitempty"`
 		} `json:"error,omitempty"`
 	}
-	if err := postJSON(ctx, o.client, o.endpoint, payload, &resp); err != nil {
+	headers := map[string]string{}
+	if strings.TrimSpace(o.apiKey) != "" {
+		headers["Authorization"] = "Bearer " + strings.TrimSpace(o.apiKey)
+	}
+
+	if err := postJSONWithHeaders(ctx, o.client, o.endpoint, payload, &resp, headers, o.apiKey); err != nil {
 		return agentResult{}, err
 	}
 	if resp.Error != nil {
-		return agentResult{}, fmt.Errorf("OpenAI-compatible LLM error: %s", resp.Error.Message)
+		return agentResult{}, fmt.Errorf("OpenAI-compatible LLM error: %s", redactSecret(resp.Error.Message, o.apiKey))
 	}
 	if len(resp.Choices) == 0 {
 		return agentResult{}, fmt.Errorf("OpenAI-compatible LLM returned no choices")
@@ -804,6 +811,10 @@ func (h httpTTSClient) Synthesize(ctx context.Context, req ttsRequest) (ttsResul
 }
 
 func postJSON(ctx context.Context, client *http.Client, endpoint string, requestBody any, responseBody any) error {
+	return postJSONWithHeaders(ctx, client, endpoint, requestBody, responseBody, nil, "")
+}
+
+func postJSONWithHeaders(ctx context.Context, client *http.Client, endpoint string, requestBody any, responseBody any, headers map[string]string, redactedSecret string) error {
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return err
@@ -814,6 +825,11 @@ func postJSON(ctx context.Context, client *http.Client, endpoint string, request
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		if strings.TrimSpace(name) != "" && value != "" {
+			req.Header.Set(name, value)
+		}
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -823,13 +839,21 @@ func postJSON(ctx context.Context, client *http.Client, endpoint string, request
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("%s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%s returned %d: %s", endpoint, resp.StatusCode, redactSecret(strings.TrimSpace(string(body)), redactedSecret))
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
 		return err
 	}
 	return nil
+}
+
+func redactSecret(text string, secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "[REDACTED]")
 }
 
 func elapsedMillis(started time.Time) int {

@@ -192,13 +192,27 @@ Example override when the modules run on the same Ubuntu host:
 [Service]
 Environment=VOICE_AGENT_ENABLE=true
 Environment=VOICE_AGENT_ASR_BACKEND=http
-Environment=VOICE_AGENT_LLM_BACKEND=http
+Environment=VOICE_AGENT_LLM_BACKEND=openai
 Environment=VOICE_AGENT_TTS_BACKEND=http
 Environment=VOICE_AGENT_ASR_ENDPOINT=http://127.0.0.1:8091/transcribe
-Environment=VOICE_AGENT_LLM_ENDPOINT=http://127.0.0.1:8092/respond
+Environment=VOICE_AGENT_LLM_ENDPOINT=https://api.deepseek.com/chat/completions
+Environment=VOICE_AGENT_LLM_MODEL=deepseek-v4-flash
+Environment=VOICE_AGENT_LLM_API_KEY=replace_with_deepseek_key
+Environment=VOICE_AGENT_LLM_MAX_TOKENS=512
 Environment=VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8093/synthesize
 Environment=VOICE_AGENT_AUTO_COMMIT=false
 ```
+
+For Kimi manual fallback, keep `VOICE_AGENT_LLM_BACKEND=openai` and switch the LLM settings to:
+
+```ini
+[Service]
+Environment=VOICE_AGENT_LLM_ENDPOINT=https://api.moonshot.ai/v1/chat/completions
+Environment=VOICE_AGENT_LLM_MODEL=replace_with_exact_kimi_model_id
+Environment=VOICE_AGENT_LLM_API_KEY=replace_with_kimi_key
+```
+
+Do not commit real API keys. Prefer a systemd drop-in override or an `EnvironmentFile` readable only by the service account/root.
 
 After changing the service:
 
