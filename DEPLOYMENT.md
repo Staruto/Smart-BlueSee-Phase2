@@ -65,6 +65,9 @@ Files to deploy:
 - Go binary from `server/`
 - static browser assets from `web/`
 - service file from `deploy/systemd/webrtc-client.service`
+- voice adapter service file from `deploy/systemd/voice-adapter.service`
+- voice adapter environment example from `deploy/voice-adapter.env.example`
+- voice adapter Python requirements from `deploy/voice-adapter-requirements.txt`
 - Nginx config from `deploy/nginx/webrtc_client.conf`
 
 ### 1.3 Configure the ESP32 firmware
@@ -106,14 +109,22 @@ Example layout:
 
 - `/opt/webrtc-client/bin/webrtc_server`
 - `/opt/webrtc-client/current/`
+- `/opt/webrtc-client/client/`
+- `/opt/webrtc-client/voice-venv/`
 - `/var/www/webrtc_client/`
+- `/etc/webrtc-client/`
 
 Example commands:
 
 ```bash
+id -u webrtc >/dev/null 2>&1 || sudo useradd --system --home /opt/webrtc-client --shell /usr/sbin/nologin webrtc
 sudo mkdir -p /opt/webrtc-client/bin
 sudo mkdir -p /opt/webrtc-client/current
+sudo mkdir -p /opt/webrtc-client/client
+sudo mkdir -p /opt/webrtc-client/.cache
+sudo mkdir -p /etc/webrtc-client
 sudo mkdir -p /var/www/webrtc_client
+sudo chown -R webrtc:webrtc /opt/webrtc-client/.cache
 ```
 
 ### 2.2 Copy artifacts to the server
@@ -122,7 +133,11 @@ Copy these from your local machine to the Ubuntu host:
 
 - `server/webrtc_server` -> `/opt/webrtc-client/bin/webrtc_server`
 - `web/*` -> `/var/www/webrtc_client/`
+- repo contents -> `/opt/webrtc-client/current/`
+- sibling `client` repo contents -> `/opt/webrtc-client/client/`
 - `deploy/systemd/webrtc-client.service` -> `/etc/systemd/system/webrtc-client.service`
+- `deploy/systemd/voice-adapter.service` -> `/etc/systemd/system/voice-adapter.service`
+- `deploy/voice-adapter.env.example` -> `/etc/webrtc-client/voice-adapter.env`
 - `deploy/nginx/webrtc_client.conf` -> `/etc/nginx/sites-available/webrtc_client.conf`
 
 If you use `scp`, the commands will look like:
@@ -130,7 +145,11 @@ If you use `scp`, the commands will look like:
 ```bash
 scp server/webrtc_server user@your-server:/tmp/webrtc_server
 scp -r web/* user@your-server:/tmp/webrtc_web/
+scp -r . user@your-server:/tmp/webrtc_current/
+scp -r ../client/* user@your-server:/tmp/webrtc_client_repo/
 scp deploy/systemd/webrtc-client.service user@your-server:/tmp/webrtc-client.service
+scp deploy/systemd/voice-adapter.service user@your-server:/tmp/voice-adapter.service
+scp deploy/voice-adapter.env.example user@your-server:/tmp/voice-adapter.env
 scp deploy/nginx/webrtc_client.conf user@your-server:/tmp/webrtc_client.conf
 ```
 
@@ -153,7 +172,80 @@ On the Ubuntu host:
 sudo rsync -av --delete /tmp/webrtc_web/ /var/www/webrtc_client/
 ```
 
-### 2.5 Install and enable systemd
+### 2.5 Install the ASR/TTS voice adapter
+
+The adapter exposes:
+
+- `GET /healthz`
+- `POST /transcribe`
+- `POST /synthesize`
+
+It should listen only on `127.0.0.1:8094` so only the Go server can call it locally.
+
+Install repo and client sources:
+
+```bash
+sudo rsync -av --delete /tmp/webrtc_current/ /opt/webrtc-client/current/
+sudo rsync -av --delete /tmp/webrtc_client_repo/ /opt/webrtc-client/client/
+sudo chown -R webrtc:webrtc /opt/webrtc-client/current /opt/webrtc-client/client
+sudo chown -R webrtc:webrtc /opt/webrtc-client/.cache
+```
+
+Create the Python environment:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-dev ffmpeg build-essential
+sudo python3 -m venv /opt/webrtc-client/voice-venv
+sudo /opt/webrtc-client/voice-venv/bin/python -m pip install --upgrade pip wheel setuptools
+sudo /opt/webrtc-client/voice-venv/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+sudo /opt/webrtc-client/voice-venv/bin/python -m pip install -r /opt/webrtc-client/current/deploy/voice-adapter-requirements.txt
+```
+
+Install adapter config and service:
+
+```bash
+sudo install -m 0644 /tmp/voice-adapter.env /etc/webrtc-client/voice-adapter.env
+sudo install -m 0644 /tmp/voice-adapter.service /etc/systemd/system/voice-adapter.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now voice-adapter
+sudo systemctl status voice-adapter
+```
+
+Initial CPU config in `/etc/webrtc-client/voice-adapter.env`:
+
+```ini
+VOICE_ADAPTER_HOST=127.0.0.1
+VOICE_ADAPTER_PORT=8094
+VOICE_ADAPTER_CLIENT_DIR=/opt/webrtc-client/client
+VOICE_ADAPTER_PRELOAD=true
+VOICE_ADAPTER_TTS_DEVICE=cpu
+VOICE_ADAPTER_ASR_MODEL_SIZE=small
+VOICE_ADAPTER_ASR_LANGUAGE=en
+VOICE_ADAPTER_TTS_MODEL_NAME=tts_models/en/vctk/vits
+VOICE_ADAPTER_TTS_SPEAKER=p225
+VOICE_ADAPTER_TTS_MAX_TEXT_LEN=500
+```
+
+Use `VOICE_ADAPTER_ASR_MODEL_SIZE=small` first on CPU. Switch to `medium` only after latency is acceptable.
+
+Validate the adapter directly:
+
+```bash
+curl http://127.0.0.1:8094/healthz
+
+curl -X POST http://127.0.0.1:8094/synthesize \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"server-test","text":"hello from server t t s","audio_format":{"encoding":"g711_ulaw","sample_rate_hz":8000,"channels":1}}'
+```
+
+Expected results:
+
+- `/healthz` returns `ok: true`
+- `/synthesize` returns `audio_base64`
+- `sudo journalctl -u voice-adapter -n 80 --no-pager` shows no startup errors
+
+### 2.6 Install and enable systemd
 
 The provided service runs:
 
@@ -161,17 +253,16 @@ The provided service runs:
 - UDP listener on `:5000`
 - no static serving from the Go process because `-web-dir=` is passed
 
-Create the service account and enable the service:
+Enable the service:
 
 ```bash
-sudo useradd --system --home /opt/webrtc-client --shell /usr/sbin/nologin webrtc
 sudo install -m 0644 /tmp/webrtc-client.service /etc/systemd/system/webrtc-client.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now webrtc-client
 sudo systemctl status webrtc-client
 ```
 
-### 2.6 Configure the voice pipeline environment
+### 2.7 Configure the voice pipeline environment
 
 By default the server uses mock backends:
 
@@ -194,12 +285,12 @@ Environment=VOICE_AGENT_ENABLE=true
 Environment=VOICE_AGENT_ASR_BACKEND=http
 Environment=VOICE_AGENT_LLM_BACKEND=openai
 Environment=VOICE_AGENT_TTS_BACKEND=http
-Environment=VOICE_AGENT_ASR_ENDPOINT=http://127.0.0.1:8091/transcribe
+Environment=VOICE_AGENT_ASR_ENDPOINT=http://127.0.0.1:8094/transcribe
 Environment=VOICE_AGENT_LLM_ENDPOINT=https://api.deepseek.com/chat/completions
 Environment=VOICE_AGENT_LLM_MODEL=deepseek-v4-flash
 Environment=VOICE_AGENT_LLM_API_KEY=replace_with_deepseek_key
 Environment=VOICE_AGENT_LLM_MAX_TOKENS=512
-Environment=VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8093/synthesize
+Environment=VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8094/synthesize
 Environment=VOICE_AGENT_AUTO_COMMIT=false
 ```
 
@@ -222,7 +313,7 @@ sudo systemctl restart webrtc-client
 sudo systemctl status webrtc-client
 ```
 
-If your ASR / LLM / TTS modules run on your local PC instead of the Ubuntu host, replace `127.0.0.1` with an address the Ubuntu host can actually reach.
+If ASR / TTS run through the local `voice-adapter` service on the Ubuntu host, keep `127.0.0.1:8094`. If modules run on your local PC instead, replace `127.0.0.1` with an address the Ubuntu host can actually reach.
 
 After manual ESP32 commit and playback are stable, enable automatic turn commits:
 
@@ -254,7 +345,7 @@ Environment=VOICE_AGENT_AUTO_COMMIT_POLL=200ms
 
 In loopback mode, the server replays the buffered ESP32 microphone audio directly back to the ESP32 speaker and does not call ASR, LLM, or TTS.
 
-### 2.7 Install and enable Nginx
+### 2.8 Install and enable Nginx
 
 The provided Nginx config serves `web/` and proxies WebSocket signaling at `/ws`.
 
@@ -275,12 +366,14 @@ sudo systemctl reload nginx
 sudo systemctl status nginx
 ```
 
-### 2.8 Open required ports
+### 2.9 Open required ports
 
 Ensure the server allows:
 
 - `80/tcp` for Nginx
 - `5000/udp` for ESP32 audio
+
+Do not open `8094/tcp`; the voice adapter should remain bound to `127.0.0.1`.
 
 Optional later:
 

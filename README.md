@@ -139,6 +139,7 @@ python tools\local_voice_adapter.py `
   --host 127.0.0.1 `
   --port 8094 `
   --client-dir C:\x\void\llm\client `
+  --tts-device cpu `
   --preload
 ```
 
@@ -164,6 +165,14 @@ $env:VOICE_AGENT_TTS_ENDPOINT="http://127.0.0.1:8094/synthesize"
 ```
 
 For cloud-to-PC validation, replace `127.0.0.1:8094` with the same server-reachable tunnel or VPN address pattern used for the real LLM.
+
+For server deployment, install the adapter as a local service on the Ubuntu host and keep it bound to `127.0.0.1:8094`. Use:
+
+- `deploy/systemd/voice-adapter.service`
+- `deploy/voice-adapter.env.example`
+- `deploy/voice-adapter-requirements.txt`
+
+Then point the Go server ASR/TTS endpoints to `http://127.0.0.1:8094/transcribe` and `http://127.0.0.1:8094/synthesize`.
 
 Software-only validation order:
 

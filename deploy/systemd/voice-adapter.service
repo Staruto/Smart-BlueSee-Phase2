@@ -1,0 +1,19 @@
+[Unit]
+Description=Local ASR/TTS voice adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webrtc
+Group=webrtc
+WorkingDirectory=/opt/webrtc-client/current
+EnvironmentFile=-/etc/webrtc-client/voice-adapter.env
+Environment=HOME=/opt/webrtc-client
+Environment=XDG_CACHE_HOME=/opt/webrtc-client/.cache
+ExecStart=/opt/webrtc-client/voice-venv/bin/python /opt/webrtc-client/current/tools/local_voice_adapter.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

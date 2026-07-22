@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
+import io
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -89,7 +92,17 @@ def generate_test_pcmu(text: str, duration_ms: int = 700) -> bytes:
 
 
 class VoiceAdapter:
-    def __init__(self, client_dir: Path, preload: bool):
+    def __init__(
+        self,
+        client_dir: Path,
+        preload: bool,
+        asr_model_size: str | None,
+        asr_language: str | None,
+        tts_model_name: str | None,
+        tts_speaker: str | None,
+        tts_max_text_len: int | None,
+        tts_device: str,
+    ):
         self.client_dir = client_dir
         if str(client_dir) not in sys.path:
             sys.path.insert(0, str(client_dir))
@@ -102,16 +115,20 @@ class VoiceAdapter:
             WHISPER_MODEL_SIZE,
         )
         from speech_asr import WhisperAsrEngine  # type: ignore
-        from speech_tts import CoquiTtsEngine  # type: ignore
 
-        self.asr_model_size = WHISPER_MODEL_SIZE
-        self.asr_language = WHISPER_LANGUAGE
-        self.tts_model_name = TTS_MODEL_NAME
-        self.tts_speaker = TTS_SPEAKER
-        self.tts_max_text_len = int(SERVER_TTS_MAX_TEXT_LEN)
+        self.asr_model_size = asr_model_size or WHISPER_MODEL_SIZE
+        self.asr_language = WHISPER_LANGUAGE if asr_language is None else asr_language or None
+        self.tts_model_name = tts_model_name or TTS_MODEL_NAME
+        self.tts_speaker = TTS_SPEAKER if tts_speaker is None else tts_speaker or None
+        self.tts_max_text_len = int(tts_max_text_len or SERVER_TTS_MAX_TEXT_LEN)
+        self.tts_device = normalize_tts_device(tts_device)
 
         self.asr = WhisperAsrEngine(model_size=self.asr_model_size, language=self.asr_language)
-        self.tts = CoquiTtsEngine(model_name=self.tts_model_name, speaker=self.tts_speaker)
+        self.tts = AdapterCoquiTtsEngine(
+            model_name=self.tts_model_name,
+            speaker=self.tts_speaker,
+            device=self.tts_device,
+        )
         self.asr_lock = threading.Lock()
         self.tts_lock = threading.Lock()
         self.started_at = time.time()
@@ -164,6 +181,7 @@ class VoiceAdapter:
             "tts": {
                 "model_name": self.tts_model_name,
                 "speaker": self.tts_speaker,
+                "device": self.tts_device,
                 "target_sample_rate_hz": AUDIO_SAMPLE_RATE_HZ,
                 "preloaded": self.tts_preloaded,
             },
@@ -239,6 +257,121 @@ class VoiceAdapter:
         }
 
 
+class AdapterCoquiTtsEngine:
+    def __init__(self, model_name: str, speaker: str | None, device: str):
+        self._model_name = model_name
+        self._speaker = speaker
+        self._device = device
+        self._engine = None
+        self._lock = threading.Lock()
+
+    def _get_engine(self):
+        if self._engine is not None:
+            return self._engine
+
+        with self._lock:
+            if self._engine is not None:
+                return self._engine
+            try:
+                from TTS.api import TTS  # type: ignore[reportMissingImports]
+            except Exception as exc:
+                raise RuntimeError(f"TTS import failed: {exc}") from exc
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                engine = TTS(
+                    model_name=self._model_name,
+                    progress_bar=False,
+                    gpu=self._device == "cuda",
+                )
+                if hasattr(engine, "to"):
+                    engine.to(self._device)
+            self._engine = engine
+            return self._engine
+
+    def preload(self):
+        self._get_engine()
+
+    @staticmethod
+    def _resample_if_needed(wav: Any, src_rate: int, dst_rate: int):
+        import numpy as np
+
+        wav_np = np.array(wav, dtype=np.float32)
+        if src_rate == dst_rate or wav_np.size == 0:
+            return wav_np
+
+        duration = wav_np.size / float(src_rate)
+        dst_len = max(1, int(duration * dst_rate))
+        x_src = np.linspace(0.0, 1.0, wav_np.size, endpoint=False)
+        x_dst = np.linspace(0.0, 1.0, dst_len, endpoint=False)
+        return np.interp(x_dst, x_src, wav_np).astype(np.float32)
+
+    def synthesize_pcm16(self, text: str, target_sample_rate: int):
+        from speech_types import TtsResult  # type: ignore
+        import numpy as np
+
+        started = time.perf_counter()
+        if not text.strip():
+            return TtsResult(ok=False, pcm16=b"", sample_rate=target_sample_rate, latency_ms=0, error="empty_text")
+
+        try:
+            engine = self._get_engine()
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return TtsResult(ok=False, pcm16=b"", sample_rate=target_sample_rate, latency_ms=latency_ms, error=str(exc))
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                if self._speaker:
+                    wav = engine.tts(text=text, speaker=self._speaker)
+                else:
+                    wav = engine.tts(text=text)
+
+            src_rate = int(getattr(engine.synthesizer, "output_sample_rate", target_sample_rate))
+            wav_np = self._resample_if_needed(wav, src_rate=src_rate, dst_rate=target_sample_rate)
+            pcm16 = np.clip(wav_np * 32767.0, -32768.0, 32767.0).astype(np.int16).tobytes()
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return TtsResult(ok=True, pcm16=pcm16, sample_rate=target_sample_rate, latency_ms=latency_ms)
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return TtsResult(ok=False, pcm16=b"", sample_rate=target_sample_rate, latency_ms=latency_ms, error=str(exc))
+
+
+def env_or_default(name: str, fallback: str) -> str:
+    value = os.environ.get(name)
+    return value if value not in (None, "") else fallback
+
+
+def env_bool_or_default(name: str, fallback: bool) -> bool:
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return fallback
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int_or_default(name: str, fallback: int) -> int:
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return fallback
+    try:
+        return int(value)
+    except ValueError:
+        return fallback
+
+
+def normalize_tts_device(device: str) -> str:
+    normalized = (device or "auto").strip().lower()
+    if normalized == "auto":
+        try:
+            import torch  # type: ignore
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    if normalized not in {"cpu", "cuda"}:
+        raise ValueError("tts_device must be cpu, cuda, or auto")
+    return normalized
+
+
 def make_handler(adapter: VoiceAdapter):
     class Handler(BaseHTTPRequestHandler):
         server_version = "LocalVoiceAdapter/1.0"
@@ -304,10 +437,16 @@ def parse_args() -> argparse.Namespace:
     default_client_dir = repo_root.parent / "client"
 
     parser = argparse.ArgumentParser(description="HTTP adapter for local ASR/TTS modules")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
-    parser.add_argument("--port", default=8094, type=int, help="Port to bind")
-    parser.add_argument("--client-dir", default=str(default_client_dir), help="Path to the local client repo")
-    parser.add_argument("--preload", action="store_true", help="Load ASR and TTS models before serving")
+    parser.add_argument("--host", default=env_or_default("VOICE_ADAPTER_HOST", "127.0.0.1"), help="Host to bind")
+    parser.add_argument("--port", default=env_int_or_default("VOICE_ADAPTER_PORT", 8094), type=int, help="Port to bind")
+    parser.add_argument("--client-dir", default=env_or_default("VOICE_ADAPTER_CLIENT_DIR", str(default_client_dir)), help="Path to the local client repo")
+    parser.add_argument("--preload", action="store_true", default=env_bool_or_default("VOICE_ADAPTER_PRELOAD", False), help="Load ASR and TTS models before serving")
+    parser.add_argument("--asr-model-size", default=os.environ.get("VOICE_ADAPTER_ASR_MODEL_SIZE"), help="Override client WHISPER_MODEL_SIZE")
+    parser.add_argument("--asr-language", default=os.environ.get("VOICE_ADAPTER_ASR_LANGUAGE"), help="Override client WHISPER_LANGUAGE; use empty string for auto-detect")
+    parser.add_argument("--tts-model-name", default=os.environ.get("VOICE_ADAPTER_TTS_MODEL_NAME"), help="Override client TTS_MODEL_NAME")
+    parser.add_argument("--tts-speaker", default=os.environ.get("VOICE_ADAPTER_TTS_SPEAKER"), help="Override client TTS_SPEAKER; use empty string for no speaker")
+    parser.add_argument("--tts-max-text-len", default=env_int_or_default("VOICE_ADAPTER_TTS_MAX_TEXT_LEN", 0), type=int, help="Override max text length")
+    parser.add_argument("--tts-device", default=env_or_default("VOICE_ADAPTER_TTS_DEVICE", "auto"), choices=["auto", "cpu", "cuda"], help="TTS runtime device")
     return parser.parse_args()
 
 
@@ -317,7 +456,16 @@ def main():
     if not client_dir.exists():
         raise SystemExit(f"client-dir does not exist: {client_dir}")
 
-    adapter = VoiceAdapter(client_dir=client_dir, preload=args.preload)
+    adapter = VoiceAdapter(
+        client_dir=client_dir,
+        preload=args.preload,
+        asr_model_size=args.asr_model_size,
+        asr_language=args.asr_language,
+        tts_model_name=args.tts_model_name,
+        tts_speaker=args.tts_speaker,
+        tts_max_text_len=args.tts_max_text_len if args.tts_max_text_len > 0 else None,
+        tts_device=args.tts_device,
+    )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(adapter))
     print(f"local voice adapter listening on http://{args.host}:{args.port}", flush=True)
     print(f"client-dir: {client_dir}", flush=True)
