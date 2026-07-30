@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +76,15 @@ func (f fakeTTSClient) Synthesize(_ context.Context, req ttsRequest) (ttsResult,
 	return ttsResult{Audio: []byte("pcmu:" + req.Text), Meta: f.meta}, nil
 }
 
+type capturingAgentClient struct {
+	lastRequest agentRequest
+}
+
+func (c *capturingAgentClient) Run(_ context.Context, req agentRequest) (agentResult, error) {
+	c.lastRequest = req
+	return agentResult{Text: "captured reply", StopReason: "test_complete"}, nil
+}
+
 func newTestVoiceAgent(asr ASRClient, agent AgentClient, tts TTSClient, playAudio func([]byte) error) *voiceAgentService {
 	cfg := config{
 		sessionID:          "test-session",
@@ -81,11 +92,14 @@ func newTestVoiceAgent(asr ASRClient, agent AgentClient, tts TTSClient, playAudi
 		asrBackend:         "test-asr",
 		llmBackend:         "test-llm",
 		ttsBackend:         "test-tts",
+		ragTopK:            4,
+		ragMaxContextChars: 5000,
+		ragMinScore:        0.02,
 		autoCommitIdle:     1500 * time.Millisecond,
 		autoCommitMinBytes: 4,
 		autoCommitMinRMSDB: -100,
 	}
-	return newVoiceAgentService(cfg, asr, agent, tts, playAudio)
+	return newVoiceAgentService(cfg, asr, agent, tts, nil, playAudio)
 }
 
 func TestRunAudioTurnExecutesASRLLMTTS(t *testing.T) {
@@ -148,6 +162,94 @@ func TestRunAudioTurnExecutesASRLLMTTS(t *testing.T) {
 	}
 	if status.LastTurn.Timing == nil || status.LastTurn.Timing.Trigger != "audio_turn" {
 		t.Fatalf("LastTurn timing not populated correctly: %#v", status.LastTurn.Timing)
+	}
+}
+
+func TestRunTextTurnBuildsBlueSeeSystemPromptWithoutRAG(t *testing.T) {
+	agent := &capturingAgentClient{}
+	cfg := config{
+		sessionID:          "test-session",
+		systemPrompt:       "Keep answers under two sentences.",
+		asrBackend:         "test-asr",
+		llmBackend:         "test-llm",
+		ttsBackend:         "test-tts",
+		ragEnable:          false,
+		ragTopK:            4,
+		ragMaxContextChars: 5000,
+		ragMinScore:        0.02,
+	}
+	voice := newVoiceAgentService(cfg, &fakeASRClient{text: "unused"}, agent, fakeTTSClient{}, nil, nil)
+
+	turn, err := voice.RunTextTurn(context.Background(), "What can you do?", false)
+	if err != nil {
+		t.Fatalf("RunTextTurn returned error: %v", err)
+	}
+	if turn.ReplyText != "captured reply" {
+		t.Fatalf("ReplyText = %q, want captured reply", turn.ReplyText)
+	}
+	if !strings.Contains(agent.lastRequest.SystemPrompt, "You are BlueSee") {
+		t.Fatalf("system prompt missing BlueSee identity: %q", agent.lastRequest.SystemPrompt)
+	}
+	if !strings.Contains(agent.lastRequest.SystemPrompt, "Keep answers under two sentences.") {
+		t.Fatalf("system prompt missing operator instruction: %q", agent.lastRequest.SystemPrompt)
+	}
+	if strings.Contains(agent.lastRequest.SystemPrompt, "Retrieved campus context") {
+		t.Fatalf("system prompt included RAG context while disabled: %q", agent.lastRequest.SystemPrompt)
+	}
+	if len(agent.lastRequest.Messages) != 1 || agent.lastRequest.Messages[0].Content != "What can you do?" {
+		t.Fatalf("messages not forwarded correctly: %#v", agent.lastRequest.Messages)
+	}
+}
+
+func TestRunTextTurnInjectsRAGContextAndStatus(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "blueSee.md"), []byte(`# The Hub
+The Hub is a general first contact point for students who are unsure which university service can help.
+
+## FoSE Support
+FoSE students and staff can ask BlueSee for Faculty of Science and Engineering orientation, but programme rules should be confirmed with official FoSE or administrative channels.
+`), 0644); err != nil {
+		t.Fatalf("write knowledge file: %v", err)
+	}
+	rag, err := loadRAGStore(dir)
+	if err != nil {
+		t.Fatalf("loadRAGStore returned error: %v", err)
+	}
+
+	agent := &capturingAgentClient{}
+	cfg := config{
+		sessionID:          "test-session",
+		systemPrompt:       "test prompt",
+		asrBackend:         "test-asr",
+		llmBackend:         "test-llm",
+		ttsBackend:         "test-tts",
+		ragEnable:          true,
+		ragTopK:            2,
+		ragMaxContextChars: 1000,
+		ragMinScore:        0.01,
+	}
+	voice := newVoiceAgentService(cfg, &fakeASRClient{text: "unused"}, agent, fakeTTSClient{}, rag, nil)
+
+	turn, err := voice.RunTextTurn(context.Background(), "Where should a FoSE student ask for help?", false)
+	if err != nil {
+		t.Fatalf("RunTextTurn returned error: %v", err)
+	}
+	if !strings.Contains(agent.lastRequest.SystemPrompt, "Retrieved campus context") {
+		t.Fatalf("system prompt missing RAG context: %q", agent.lastRequest.SystemPrompt)
+	}
+	if !strings.Contains(agent.lastRequest.SystemPrompt, "The Hub is a general first contact point") {
+		t.Fatalf("system prompt missing retrieved content: %q", agent.lastRequest.SystemPrompt)
+	}
+	if len(turn.Trace) == 0 || turn.Trace[0].Type != "rag" || !strings.Contains(turn.Trace[0].Summary, ragRouteContext) {
+		t.Fatalf("turn trace missing RAG step: %#v", turn.Trace)
+	}
+
+	status := voice.Status("")
+	if !status.RAGEnabled {
+		t.Fatalf("RAGEnabled = false, want true")
+	}
+	if status.RAGFiles != 1 || status.RAGSections != 2 {
+		t.Fatalf("RAG stats = files %d sections %d, want 1/2", status.RAGFiles, status.RAGSections)
 	}
 }
 
@@ -323,7 +425,7 @@ func TestShouldAutoCommitDropsLowEnergyBufferedAudio(t *testing.T) {
 		autoCommitMinAudio: 800 * time.Millisecond,
 		autoCommitMinRMSDB: -45,
 	}
-	voice := newVoiceAgentService(cfg, &fakeASRClient{text: "unused"}, fakeAgentClient{}, fakeTTSClient{}, nil)
+	voice := newVoiceAgentService(cfg, &fakeASRClient{text: "unused"}, fakeAgentClient{}, fakeTTSClient{}, nil, nil)
 	voice.IngestAudio(bytesOf(0xFF, 8000))
 
 	if voice.ShouldAutoCommit(time.Now().Add(2 * time.Second)) {

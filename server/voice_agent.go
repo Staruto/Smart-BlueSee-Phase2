@@ -24,6 +24,22 @@ const (
 	disableAutoCommitRMS  = -100
 )
 
+const blueSeeSystemPrompt = `You are BlueSee, the mascot and AI assistant for the Faculty of Science and Engineering at University of Nottingham Ningbo China.
+
+You serve FoSE students and staff. Answer general questions normally, and answer university-specific questions using retrieved campus context when it is available.
+
+Style:
+- Keep replies concise, friendly, and suitable for spoken TTS.
+- Prefer direct next steps over long explanations.
+- If the user asks in Chinese, answer in Chinese. Otherwise answer in the user's language.
+
+Grounding rules:
+- Use retrieved campus context over model memory for University of Nottingham Ningbo China or FoSE facts.
+- Do not invent office names, deadlines, phone numbers, policies, room locations, programme rules, or staff responsibilities.
+- If the retrieved context is missing or insufficient for a university-specific question, say that the current knowledge base does not contain enough information and suggest checking the official UNNC website, The Hub, or the relevant FoSE/admin office.
+- For time-sensitive facts, say when the answer is not live-verified unless the retrieved context provides the detail.
+- For urgent danger, medical emergencies, or self-harm risk, advise contacting local emergency/professional support immediately.`
+
 var errASREmptyText = errors.New("ASR returned empty text")
 
 type audioFormat struct {
@@ -126,6 +142,9 @@ type voiceStatus struct {
 	HistoryMessages    int               `json:"history_messages"`
 	ESP32Endpoint      string            `json:"esp32_endpoint,omitempty"`
 	Backends           map[string]string `json:"backends"`
+	RAGEnabled         bool              `json:"rag_enabled"`
+	RAGFiles           int               `json:"rag_files,omitempty"`
+	RAGSections        int               `json:"rag_sections,omitempty"`
 	AutoCommit         bool              `json:"auto_commit"`
 	AutoCommitMode     string            `json:"auto_commit_mode,omitempty"`
 	AutoCommitIdleMs   int               `json:"auto_commit_idle_ms,omitempty"`
@@ -152,6 +171,7 @@ type voiceAgentService struct {
 	asr       ASRClient
 	agent     AgentClient
 	tts       TTSClient
+	rag       *ragStore
 	playAudio func([]byte) error
 
 	mu          sync.Mutex
@@ -163,12 +183,13 @@ type voiceAgentService struct {
 	lastAudioAt time.Time
 }
 
-func newVoiceAgentService(cfg config, asr ASRClient, agent AgentClient, tts TTSClient, playAudio func([]byte) error) *voiceAgentService {
+func newVoiceAgentService(cfg config, asr ASRClient, agent AgentClient, tts TTSClient, rag *ragStore, playAudio func([]byte) error) *voiceAgentService {
 	return &voiceAgentService{
 		cfg:       cfg,
 		asr:       asr,
 		agent:     agent,
 		tts:       tts,
+		rag:       rag,
 		playAudio: playAudio,
 	}
 }
@@ -195,12 +216,16 @@ func (v *voiceAgentService) Status(esp32Endpoint string) voiceStatus {
 			"llm": v.cfg.llmBackend,
 			"tts": v.cfg.ttsBackend,
 		},
+		RAGEnabled:         v.cfg.ragEnable && v.rag != nil,
 		AutoCommit:         v.cfg.autoCommit,
 		AutoCommitMode:     v.cfg.autoCommitMode,
 		AutoCommitIdleMs:   int(v.cfg.autoCommitIdle / time.Millisecond),
 		AutoCommitMinBytes: v.cfg.autoCommitMinBytes,
 		AutoCommitMinAudio: int(v.cfg.autoCommitMinAudio / time.Millisecond),
 		AutoCommitMinRMSDB: v.cfg.autoCommitMinRMSDB,
+	}
+	if status.RAGEnabled {
+		status.RAGFiles, status.RAGSections = v.rag.Stats()
 	}
 	if v.lastTurn != nil {
 		turnCopy := *v.lastTurn
@@ -475,9 +500,10 @@ func (v *voiceAgentService) finishTurn(turn *voiceTurnResult) {
 
 func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text string, inputAudioBytes int, speak bool, timing *voiceTurnTiming) (voiceTurnResult, error) {
 	messages := v.buildMessages(text)
+	ragResult := v.retrieveRAG(text)
 	agentReq := agentRequest{
 		SessionID:       v.cfg.sessionID,
-		SystemPrompt:    v.cfg.systemPrompt,
+		SystemPrompt:    v.buildSystemPrompt(ragResult),
 		Messages:        messages,
 		EnableToolCalls: false,
 		MaxSteps:        1,
@@ -527,16 +553,47 @@ func (v *voiceAgentService) executeTurn(ctx context.Context, source string, text
 
 	v.appendHistory(text, replyText)
 
+	trace := append([]agentTraceStep(nil), ragTraceStep(ragResult)...)
+	trace = append(trace, agentResp.Trace...)
 	turn := voiceTurnResult{
 		Source:           source,
 		InputText:        text,
 		ReplyText:        replyText,
 		InputAudioBytes:  inputAudioBytes,
 		OutputAudioBytes: len(synthResp.Audio),
-		Trace:            agentResp.Trace,
+		Trace:            trace,
 		Timing:           timing,
 	}
 	return turn, nil
+}
+
+func (v *voiceAgentService) retrieveRAG(text string) ragResult {
+	if !v.cfg.ragEnable || v.rag == nil {
+		return ragResult{Route: ragRouteDisabled}
+	}
+	return v.rag.Retrieve(text, v.cfg.ragTopK, v.cfg.ragMaxContextChars, v.cfg.ragMinScore)
+}
+
+func (v *voiceAgentService) buildSystemPrompt(result ragResult) string {
+	parts := []string{blueSeeSystemPrompt}
+	if strings.TrimSpace(v.cfg.systemPrompt) != "" {
+		parts = append(parts, "Additional operator instruction:\n"+strings.TrimSpace(v.cfg.systemPrompt))
+	}
+	if strings.TrimSpace(result.Context) != "" {
+		parts = append(parts, "Retrieved campus context:\n"+result.Context)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func ragTraceStep(result ragResult) []agentTraceStep {
+	if result.Route == "" || result.Route == ragRouteDisabled {
+		return nil
+	}
+	summary := fmt.Sprintf("RAG route=%s files=%d sections=%d context_chars=%d", result.Route, result.Files, result.SectionCount, result.ContextChars)
+	if len(result.Sections) > 0 {
+		summary += " sources=" + strings.Join(result.Sections, "; ")
+	}
+	return []agentTraceStep{{Step: 1, Type: "rag", Summary: summary}}
 }
 
 func (v *voiceAgentService) buildMessages(userText string) []chatMessage {
