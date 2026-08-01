@@ -64,6 +64,7 @@ Files to deploy:
 
 - Go binary from `server/`
 - static browser assets from `web/`
+- curated RAG knowledge files from `knowledge/`
 - service file from `deploy/systemd/webrtc-client.service`
 - voice adapter service file from `deploy/systemd/voice-adapter.service`
 - voice adapter environment example from `deploy/voice-adapter.env.example`
@@ -135,6 +136,7 @@ Copy these from your local machine to the Ubuntu host:
 - `web/*` -> `/var/www/webrtc_client/`
 - repo contents -> `/opt/webrtc-client/current/`
 - sibling `client` repo contents -> `/opt/webrtc-client/client/`
+- `knowledge/*` -> `/opt/webrtc-client/current/knowledge/`
 - `deploy/systemd/webrtc-client.service` -> `/etc/systemd/system/webrtc-client.service`
 - `deploy/systemd/voice-adapter.service` -> `/etc/systemd/system/voice-adapter.service`
 - `deploy/voice-adapter.env.example` -> `/etc/webrtc-client/voice-adapter.env`
@@ -147,6 +149,7 @@ scp server/webrtc_server user@your-server:/tmp/webrtc_server
 scp -r web/* user@your-server:/tmp/webrtc_web/
 scp -r . user@your-server:/tmp/webrtc_current/
 scp -r ../client/* user@your-server:/tmp/webrtc_client_repo/
+scp -r knowledge user@your-server:/tmp/webrtc_knowledge/
 scp deploy/systemd/webrtc-client.service user@your-server:/tmp/webrtc-client.service
 scp deploy/systemd/voice-adapter.service user@your-server:/tmp/voice-adapter.service
 scp deploy/voice-adapter.env.example user@your-server:/tmp/voice-adapter.env
@@ -245,6 +248,14 @@ Expected results:
 - `/synthesize` returns `audio_base64`
 - `sudo journalctl -u voice-adapter -n 80 --no-pager` shows no startup errors
 
+Install the curated RAG knowledge files:
+
+```bash
+sudo mkdir -p /opt/webrtc-client/current/knowledge
+sudo rsync -av --delete /tmp/webrtc_knowledge/ /opt/webrtc-client/current/knowledge/
+sudo chown -R root:root /opt/webrtc-client/current/knowledge
+```
+
 ### 2.6 Install and enable systemd
 
 The provided service runs:
@@ -290,6 +301,11 @@ Environment=VOICE_AGENT_LLM_ENDPOINT=https://api.deepseek.com/chat/completions
 Environment=VOICE_AGENT_LLM_MODEL=deepseek-v4-flash
 Environment=VOICE_AGENT_LLM_API_KEY=replace_with_deepseek_key
 Environment=VOICE_AGENT_LLM_MAX_TOKENS=512
+Environment=VOICE_AGENT_RAG_ENABLE=true
+Environment=VOICE_AGENT_RAG_DIR=/opt/webrtc-client/current/knowledge
+Environment=VOICE_AGENT_RAG_TOP_K=4
+Environment=VOICE_AGENT_RAG_MAX_CONTEXT_CHARS=5000
+Environment=VOICE_AGENT_RAG_MIN_SCORE=0.02
 Environment=VOICE_AGENT_TTS_ENDPOINT=http://127.0.0.1:8094/synthesize
 Environment=VOICE_AGENT_AUTO_COMMIT=false
 ```
@@ -304,6 +320,8 @@ Environment=VOICE_AGENT_LLM_API_KEY=replace_with_kimi_key
 ```
 
 Do not commit real API keys. Prefer a systemd drop-in override or an `EnvironmentFile` readable only by the service account/root.
+
+RAG is Go-native and local to the Go server. It does not call ASR, TTS, or external tools. Update `/opt/webrtc-client/current/knowledge` with verified UNNC/FoSE `.md` or `.txt` files, then restart the service so the server reloads them.
 
 After changing the service:
 
@@ -447,6 +465,9 @@ Expected results:
 
 - `last_turn` is populated
 - `history_messages` increased
+- `rag_enabled` is `true` when RAG is configured
+- `rag_files` and `rag_sections` are greater than `0` after the knowledge files are deployed
+- the turn `trace` includes a `rag` step with `rag_context` for matching UNNC/FoSE questions, or `rag_no_match` for unrelated questions
 
 ### 4.3 Validate software-only audio turns without ESP32
 

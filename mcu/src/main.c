@@ -53,7 +53,7 @@ static int16_t *speaker_ref = NULL;
 #define UDP_HEARTBEAT_ACK_1 'B'
 
 // --- Audio ---
-#define SAMPLE_RATE    16000
+#define SAMPLE_RATE    8000
 #define UDP_AUDIO_RATE 8000
 #define I2S_DMA_BUF_COUNT 8
 #define I2S_DMA_BUF_LEN   256
@@ -74,7 +74,7 @@ static int16_t *speaker_ref = NULL;
 #define VAD_DEBUG_LOG_MS 2000
 #define MAX_ULAW_PACKET_BYTES 1024
 #define ULAW_TX_FRAME_BYTES 160
-#define PCM_TX_FRAME_SAMPLES 320
+#define PCM_TX_FRAME_SAMPLES 160
 
 static int16_t ref_ring[AEC_REF_RING_SAMPLES];
 static int ref_write_pos = 0;

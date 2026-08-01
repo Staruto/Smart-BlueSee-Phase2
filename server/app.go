@@ -14,6 +14,7 @@ type serverApp struct {
 	udp    *udpBridge
 	webrtc *webRTCBridge
 	voice  *voiceAgentService
+	rag    *ragStore
 }
 
 func newServerApp(cfg config) (*serverApp, error) {
@@ -34,6 +35,14 @@ func newServerApp(cfg config) (*serverApp, error) {
 	}
 
 	if cfg.enableVoiceAgent {
+		if cfg.ragEnable {
+			rag, err := loadRAGStore(cfg.ragDir)
+			if err != nil {
+				return nil, err
+			}
+			app.rag = rag
+		}
+
 		asrClient, err := newASRClient(cfg)
 		if err != nil {
 			return nil, err
@@ -47,7 +56,7 @@ func newServerApp(cfg config) (*serverApp, error) {
 			return nil, err
 		}
 
-		app.voice = newVoiceAgentService(cfg, asrClient, agentClient, ttsClient, func(audio []byte) error {
+		app.voice = newVoiceAgentService(cfg, asrClient, agentClient, ttsClient, app.rag, func(audio []byte) error {
 			return app.udp.SendPCMU(audio, cfg.ttsFrameBytes, cfg.ttsFrameDelay)
 		})
 	}
@@ -68,6 +77,20 @@ func (a *serverApp) start() error {
 			a.cfg.ttsBackend,
 			a.cfg.sessionID,
 		)
+		if a.cfg.ragEnable {
+			files, sections := a.rag.Stats()
+			log.Printf(
+				"Voice RAG enabled (dir=%s files=%d sections=%d top_k=%d max_context_chars=%d min_score=%.3f)",
+				a.cfg.ragDir,
+				files,
+				sections,
+				a.cfg.ragTopK,
+				a.cfg.ragMaxContextChars,
+				a.cfg.ragMinScore,
+			)
+		} else {
+			log.Printf("Voice RAG disabled")
+		}
 		if a.cfg.autoCommit {
 			log.Printf(
 				"Voice auto-commit enabled (mode=%s idle=%s min_bytes=%d min_audio=%s min_rms_db=%.1f poll=%s)",

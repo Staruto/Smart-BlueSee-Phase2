@@ -22,6 +22,11 @@ type config struct {
 	llmModel           string
 	llmMaxTokens       int
 	llmAPIKey          string
+	ragEnable          bool
+	ragDir             string
+	ragTopK            int
+	ragMaxContextChars int
+	ragMinScore        float64
 	ttsBackend         string
 	ttsEndpoint        string
 	mockASRText        string
@@ -52,6 +57,11 @@ func loadConfig() config {
 		llmModel:           envOrDefault("VOICE_AGENT_LLM_MODEL", "local-model"),
 		llmMaxTokens:       envIntOrDefault("VOICE_AGENT_LLM_MAX_TOKENS", 512),
 		llmAPIKey:          envOrDefault("VOICE_AGENT_LLM_API_KEY", ""),
+		ragEnable:          envBoolOrDefault("VOICE_AGENT_RAG_ENABLE", true),
+		ragDir:             envOrDefault("VOICE_AGENT_RAG_DIR", "../knowledge"),
+		ragTopK:            envIntOrDefault("VOICE_AGENT_RAG_TOP_K", 4),
+		ragMaxContextChars: envIntOrDefault("VOICE_AGENT_RAG_MAX_CONTEXT_CHARS", 5000),
+		ragMinScore:        envFloatOrDefault("VOICE_AGENT_RAG_MIN_SCORE", 0.02),
 		ttsBackend:         envOrDefault("VOICE_AGENT_TTS_BACKEND", "mock"),
 		ttsEndpoint:        envOrDefault("VOICE_AGENT_TTS_ENDPOINT", "http://127.0.0.1:8093/synthesize"),
 		mockASRText:        envOrDefault("VOICE_AGENT_MOCK_ASR_TEXT", ""),
@@ -80,6 +90,11 @@ func loadConfig() config {
 	flag.StringVar(&cfg.llmModel, "llm-model", cfg.llmModel, "LLM model name used by OpenAI-compatible backends")
 	flag.IntVar(&cfg.llmMaxTokens, "llm-max-tokens", cfg.llmMaxTokens, "Max tokens for OpenAI-compatible LLM requests")
 	flag.StringVar(&cfg.llmAPIKey, "llm-api-key", cfg.llmAPIKey, "API key used by OpenAI-compatible LLM backends")
+	flag.BoolVar(&cfg.ragEnable, "rag-enable", cfg.ragEnable, "Enable local RAG context injection for the LLM prompt")
+	flag.StringVar(&cfg.ragDir, "rag-dir", cfg.ragDir, "Directory containing local RAG .md and .txt knowledge files")
+	flag.IntVar(&cfg.ragTopK, "rag-top-k", cfg.ragTopK, "Maximum number of RAG sections to include per turn")
+	flag.IntVar(&cfg.ragMaxContextChars, "rag-max-context-chars", cfg.ragMaxContextChars, "Maximum RAG context characters injected into the system prompt")
+	flag.Float64Var(&cfg.ragMinScore, "rag-min-score", cfg.ragMinScore, "Minimum TF-IDF cosine score for a RAG section")
 	flag.StringVar(&cfg.ttsBackend, "tts-backend", cfg.ttsBackend, "TTS backend: mock or http")
 	flag.StringVar(&cfg.ttsEndpoint, "tts-endpoint", cfg.ttsEndpoint, "TTS HTTP endpoint")
 	flag.StringVar(&cfg.mockASRText, "mock-asr-text", cfg.mockASRText, "Static text returned by the mock ASR backend")

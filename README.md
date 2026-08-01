@@ -105,6 +105,11 @@ Environment variables:
 - `VOICE_AGENT_LLM_MODEL=local-model`
 - `VOICE_AGENT_LLM_API_KEY=...`
 - `VOICE_AGENT_LLM_MAX_TOKENS=512`
+- `VOICE_AGENT_RAG_ENABLE=true`
+- `VOICE_AGENT_RAG_DIR=../knowledge`
+- `VOICE_AGENT_RAG_TOP_K=4`
+- `VOICE_AGENT_RAG_MAX_CONTEXT_CHARS=5000`
+- `VOICE_AGENT_RAG_MIN_SCORE=0.02`
 - `VOICE_AGENT_AUTO_COMMIT=false`
 - `VOICE_AGENT_AUTO_COMMIT_MODE=agent`
 - `VOICE_AGENT_AUTO_COMMIT_IDLE=1500ms`
@@ -125,6 +130,8 @@ $env:VOICE_AGENT_LLM_API_KEY="..."
 ```
 
 Kimi can be used the same way by setting `VOICE_AGENT_LLM_ENDPOINT=https://api.moonshot.ai/v1/chat/completions` and `VOICE_AGENT_LLM_MODEL` to the exact model ID from the Kimi console/API docs.
+
+RAG is enabled by default. The server loads `.md` and `.txt` files from `knowledge/`, retrieves relevant sections for each user turn, and injects them into the BlueSee system prompt. The initial curated knowledge base is intentionally conservative; update it with verified UNNC/FoSE facts before relying on specific policy, deadline, office, or contact details.
 
 Auto-commit can be enabled after ESP32 VAD-gated audio upload is stable. When enabled in `agent` mode, the server commits buffered ESP32 audio after no new audio arrives for the configured idle duration, then sends TTS playback to the ESP32. In `loopback` mode, the server sends the raw buffered audio back to ESP32 instead of calling ASR, LLM, or TTS. The server also applies a secondary guard before committing: the buffer must satisfy the minimum byte count, minimum audio duration, and minimum RMS level. Set `VOICE_AGENT_AUTO_COMMIT_MIN_RMS_DB=-100` or lower to disable the RMS guard during debugging.
 
