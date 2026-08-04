@@ -1,5 +1,6 @@
 # Go
 /server/webrtc_server
+/server/webrtc_server_linux
 /server/webrtc_server.exe
 .gocache/
 *.exe
